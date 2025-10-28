@@ -17,6 +17,11 @@ MAX_FOLHAS = 300
 # Esta área é OTIMIZADA para encontrar o número da folha (geralmente no cabeçalho).
 OCR_ROI = (450, 50, 950, 250)
 
+# LIMIAR DE CARACTERES para detecção de "verso"
+# Se o OCR da imagem completa retornar menos do que este número de caracteres,
+# a página é considerada "em branco" ou "quase em branco" (verso).
+LIMIAR_CARACTERES_VERSO = 250 
+
 # Caminho para o executável do Tesseract (ajuste se necessário, especialmente no Windows)
 # pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract' # Descomente e ajuste se necessário
 
@@ -38,10 +43,8 @@ CORRECOES_MANUAIS: Dict[str, int] = {
     "IMG_20251015_115652": 218,
     # FL. 004 (IMG_20251015_112749) deveria ser Folha 43,
     "IMG_20251015_112749": 43,
-    # Se a imagem IMG_20251015_135831 for o Termo de Abertura, adicione aqui (retorna 0)
+    # Exemplo: Se "IMG_20251015_135831" for Termo de Abertura (0)
     # Exemplo: "IMG_20251015_135831": 0,
-    # Se a imagem for o Termo de Encerramento (FL. 301), adicione aqui (retorna 301)
-    # Exemplo: "ERRO_OCR_IMG_20251015_120736": MAX_FOLHAS + 1,
 }
 
 # ----------------------------------------------------
@@ -66,32 +69,24 @@ def verificar_sucesso_ocr_roi(image: Image.Image, ocr_roi: tuple, psm_config: st
     try:
         cropped_image = image.crop(crop_box)
         text_roi = pytesseract.image_to_string(cropped_image, config=psm_config)
-        upper_text_roi = text_roi.upper()
         
-        # Procura por padrões de número de folha (ex: FOLHA: 42, FL. 42)
-        match = re.search(r'(FOLHA|FL)\s*[:.\s]*(\d+)', upper_text_roi)
+        # O OCR só é considerado bem-sucedido se encontrar o padrão FOLHA/FL
+        match = re.search(r'(FOLHA|FL)\s*[:.\s]*(\d+)', text_roi.upper())
         return match is not None
     except Exception:
-        # Falha no OCR ou corte. Considera como insucesso na rotação.
         return False
 
 
-def extrair_numero_folha_ocr(image: Image.Image) -> Optional[int]:
+def extrair_numero_folha_ocr(image: Image.Image) -> tuple[Optional[int], str]:
     """
-    Tenta identificar Termos Especiais (Abertura/Encerramento) usando OCR na imagem
-    completa. Se não for um Termo Especial, recorta a imagem para o ROI
-    e executa o OCR para o número da folha.
-    
-    Retorna o número da folha (int):
-      - 0 para Termo de Abertura
-      - MAX_FOLHAS + 1 para Termo de Encerramento
-      - Número da folha para páginas normais
-      - None se não for encontrado
+    Tenta identificar Termos Especiais e Números de Folha.
+    Retorna uma tupla: (Número da folha (int ou None), Texto completo do OCR).
     """
     global PSM_CONFIG, OCR_ROI
 
-    # --- 1. Tentar identificar Termos Especiais usando OCR na IMAGEM COMPLETA ---
+    full_text = ""
     try:
+        # Tentar OCR na imagem completa para capturar Termos Especiais e texto para o limite de verso
         # Usar uma configuração de PSM para página completa (PSM 3)
         full_text = pytesseract.image_to_string(image, config=r'--oem 3 -l por --psm 3')
         upper_text = full_text.upper()
@@ -99,37 +94,30 @@ def extrair_numero_folha_ocr(image: Image.Image) -> Optional[int]:
         # 1a. Verifica Termo de Abertura
         if "TERMO DE ABERTURA" in upper_text or "TERMO DE INSTALAÇÃO" in upper_text:
             print("  > OCR ENCONTRADO (Página Completa): Termo de Abertura.")
-            return 0
+            return 0, full_text
         
         # 1b. Verifica Termo de Encerramento
         if "TERMO DE ENCERRAMENTO" in upper_text:
             print("  > OCR ENCONTRADO (Página Completa): Termo de Encerramento.")
-            return MAX_FOLHAS + 1 
+            return MAX_FOLHAS + 1, full_text
             
     except pytesseract.TesseractNotFoundError:
         print("  > ERRO CRÍTICO DE OCR: O Tesseract OCR não foi encontrado. Verifique o caminho.")
-        return None
+        return None, full_text
     except Exception as e:
         print(f"  > ERRO durante a tentativa de OCR na página completa: {e}")
         # Continua para a próxima etapa (OCR por ROI) em caso de erro não crítico
 
     # --- 2. Tentar identificar Número de Folha usando OCR na REGIÃO DE INTERESSE (ROI) ---
-    # 2a. Definir o box de corte em PIXELS
     img_width, img_height = image.size
-    
-    # Converte as coordenadas (0-1000) para pixels
     x_min = int(img_width * OCR_ROI[0] / 1000)
     y_min = int(img_height * OCR_ROI[1] / 1000)
     x_max = int(img_width * OCR_ROI[2] / 1000)
     y_max = int(img_height * OCR_ROI[3] / 1000)
-    
     crop_box = (x_min, y_min, x_max, y_max)
     
     try:
-        # 2b. Recortar a imagem
         cropped_image = image.crop(crop_box)
-        
-        # 2c. Executar o OCR apenas na área recortada (usando PSM 6 otimizado)
         text_roi = pytesseract.image_to_string(cropped_image, config=PSM_CONFIG)
         upper_text_roi = text_roi.upper()
 
@@ -137,120 +125,138 @@ def extrair_numero_folha_ocr(image: Image.Image) -> Optional[int]:
         match = re.search(r'(FOLHA|FL)\s*[:.\s]*(\d+)', upper_text_roi)
 
         if match:
-            # Captura o grupo 2 da regex, que é o número da folha
             folha_numero = int(match.group(2))
             print(f"  > OCR SUCESSO (ROI): Folha nº {folha_numero}")
-            return folha_numero
+            return folha_numero, full_text
         
-        print(f"  > OCR FALHA: Não encontrou um número de folha claro no ROI: '{upper_text_roi.strip().replace('\n', ' ')}'")
-        return None
+        # OCR falhou no ROI.
+        return None, full_text
 
     except Exception as e:
         print(f"  > ERRO durante o processamento OCR no ROI: {e}")
-        return None
+        return None, full_text
 
 
 def processar_imagens_no_diretorio(input_dir, output_dir):
     """
     Percorre o diretório de entrada, processa arquivos .jpg/.jpeg, aplica rotação
-    inteligente, OCR, correções manuais (fallback) e salva como .pdf.
+    inteligente, OCR, correções manuais (fallback), lógica de "-verso"
+    e salva como .pdf, seguindo a ordem alfabética/numérica do nome do arquivo.
     """
-    global OCR_ROI, PSM_CONFIG
+    global OCR_ROI, PSM_CONFIG, LIMIAR_CARACTERES_VERSO
     print(f"Iniciando processamento no diretório: {input_dir}")
 
-    # 1. Verifica e cria o diretório de saída
     if not os.path.isdir(input_dir):
-        print(f"ERRO: O caminho '{input_dir}' não é um diretório válido. Por favor, configure a variável INPUT_DIR corretamente.")
+        print(f"ERRO: O caminho '{input_dir}' não é um diretório válido.")
         return
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         print(f"Diretório de saída criado: {output_dir}")
 
-    # 2. Itera sobre todos os itens dentro do diretório de entrada
-    for filename in os.listdir(input_dir):
-        input_path = os.path.join(input_dir, filename)
+    # Variável de estado para rastrear o último número de folha (para a regra de "verso")
+    ultima_folha_processada = 0 
+    
+    arquivos_encontrados = [
+        f for f in os.listdir(input_dir)
+        if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(('.jpg', '.jpeg'))
+    ]
+    arquivos_ordenados = sorted(arquivos_encontrados)
+    print(f"Foram encontrados {len(arquivos_ordenados)} imagens para processamento (ordenadas por nome).")
 
-        # Remove a extensão para usar na verificação de correções
+    for filename in arquivos_ordenados:
+        input_path = os.path.join(input_dir, filename)
         base_filename = os.path.splitext(filename)[0]
 
-        # 3. Filtra: verifica se é um ARQUIVO e se possui a extensão .jpg ou .jpeg
-        if os.path.isfile(input_path) and filename.lower().endswith(('.jpg', '.jpeg')):
+        print(f"\nProcessando arquivo: {filename}...")
 
-            print(f"\nProcessando arquivo: {filename}...")
+        try:
+            img = Image.open(input_path)
 
-            try:
-                img = Image.open(input_path)
-
-                # --- ROTAÇÃO INTELIGENTE BASEADA NA ORIENTAÇÃO E OCR ---
-                if img.width > img.height:
-                    # Imagem em Paisagem (deve ser rotacionada)
-                    
-                    # 1. Tentar -90 graus (virada para a esquerda)
-                    img_neg90 = img.rotate(-90, expand=True)
-                    if verificar_sucesso_ocr_roi(img_neg90, OCR_ROI, PSM_CONFIG):
+            # --- ROTAÇÃO INTELIGENTE ---
+            if img.width > img.height:
+                img_neg90 = img.rotate(-90, expand=True)
+                
+                # Prioriza a rotação que resulta em um OCR bem-sucedido no ROI
+                if verificar_sucesso_ocr_roi(img_neg90, OCR_ROI, PSM_CONFIG):
+                    img = img_neg90
+                    print("  > Orientação: Paisagem. Rotacionado em -90 graus (Para a esquerda) via OCR.")
+                else:
+                    img_pos90 = img.rotate(90, expand=True)
+                    if verificar_sucesso_ocr_roi(img_pos90, OCR_ROI, PSM_CONFIG):
+                        img = img_pos90
+                        print("  > Orientação: Paisagem. Rotacionado em +90 graus (Para a direita) via OCR.")
+                    else:
                         img = img_neg90
-                        print("  > Orientação: Paisagem. Rotacionado em -90 graus (Para a esquerda) via OCR.")
-                    else:
-                        # 2. Tentar +90 graus (virada para a direita)
-                        img_pos90 = img.rotate(90, expand=True)
-                        if verificar_sucesso_ocr_roi(img_pos90, OCR_ROI, PSM_CONFIG):
-                            img = img_pos90
-                            print("  > Orientação: Paisagem. Rotacionado em +90 graus (Para a direita) via OCR.")
-                        else:
-                            # 3. Fallback (Mantém a rotação de -90, como era o padrão)
-                            img = img_neg90
-                            print("  > Orientação: Paisagem. OCR de rotação falhou. Fallback para -90 graus.")
+                        print("  > Orientação: Paisagem. OCR de rotação falhou. Fallback para -90 graus.")
+            else:
+                print("  > Orientação: Retrato ou Quadrada. Sem rotação.")
+            
+            # --- OCR, Extração e Texto Completo ---
+            folha_num_ocr, full_ocr_text = extrair_numero_folha_ocr(img)
+            folha_num = folha_num_ocr
+            
+            sufixo = ""
+
+            # --- CORREÇÃO MANUAL / OVERRIDE ---
+            if base_filename in CORRECOES_MANUAIS:
+                folha_num = CORRECOES_MANUAIS[base_filename]
+                print(f"  > CORREÇÃO MANUAL APLICADA: '{base_filename}' forçado para Folha nº {folha_num}.")
+            
+            # --- LÓGICA DE 'VERSO' (Se o OCR falhou E não é Termo) ---
+            if folha_num is None:
+                # Se o OCR falhou e não é um Termo (Termos já são tratados no extrair_numero_folha_ocr)
+                
+                # Remove espaços e quebras de linha para contar apenas o texto útil
+                texto_limpo = re.sub(r'\s+', '', full_ocr_text)
+                
+                if len(texto_limpo) < LIMIAR_CARACTERES_VERSO and ultima_folha_processada > 0:
+                    # Se o texto for muito pequeno, assume que é o verso da última folha
+                    folha_num = ultima_folha_processada
+                    sufixo = "-verso"
+                    print(f"  > AVISO: OCR falhou e pouco texto ({len(texto_limpo)} chars). Aplicando regra de VERSO: Folha nº {folha_num}{sufixo}.")
                 else:
-                    print("  > Orientação: Retrato ou Quadrada. Sem rotação.")
+                    # Não foi possível identificar o número E não é considerada uma página de verso
+                    folha_num = None
+                    print(f"  > AVISO: OCR falhou e texto extenso ({len(texto_limpo)} chars). Não é verso. Marcando como ERRO.")
+
+            # --- ATUALIZAÇÃO DO RASTREADOR DE FOLHA ---
+            # Atualiza o rastreador APENAS se um número de folha frontal foi encontrado (excluindo 0 e MAX_FOLHAS+1)
+            if folha_num is not None and folha_num > 0 and folha_num <= MAX_FOLHAS:
+                # Se a página tiver o número da folha, este é a folha frontal.
+                ultima_folha_processada = folha_num
                 
-                # --- OCR e Extração de Número da Folha ---
-                folha_num_ocr = extrair_numero_folha_ocr(img)
-                folha_num = folha_num_ocr
+            # --- 5. Definição do Nome do Arquivo ---
+            if folha_num is not None:
                 
-                # --- CORREÇÃO MANUAL / OVERRIDE ---
-                # Verifica se o arquivo tem uma correção manual definida.
-                if base_filename in CORRECOES_MANUAIS:
-                    folha_num_corrigido = CORRECOES_MANUAIS[base_filename]
-                    print(f"  > CORREÇÃO MANUAL APLICADA: '{base_filename}' forçado para Folha nº {folha_num_corrigido}.")
-                    folha_num = folha_num_corrigido # Sobrescreve o resultado do OCR
-                
-                # --- 5. Definição do Nome do Arquivo ---
-                if folha_num is not None:
-                    
-                    if folha_num == 0:
-                        # Termo de Abertura: FL. 000
-                        novo_filename = "FL. 000 - TERMO DE ABERTURA.pdf"
-                        print(f"  > NOME DEFINIDO: Termo de Abertura -> '{novo_filename}'.")
-                    elif folha_num == MAX_FOLHAS + 1:
-                        # Termo de Encerramento: FL. 301 (ou MAX_FOLHAS + 1)
-                        novo_filename = f"FL. {folha_num:03d} - TERMO DE ENCERRAMENTO.pdf"
-                        print(f"  > NOME DEFINIDO: Termo de Encerramento -> '{novo_filename}'.")
-                    else:
-                        # Folha normal: FL. 042. O :03d garante 3 dígitos.
-                        novo_filename = f"FL. {folha_num:03d}.pdf"
-                        print(f"  > NOME DEFINIDO: Folha {folha_num:03d} -> '{novo_filename}'.")
-                
+                if folha_num == 0:
+                    # Termo de Abertura: FL. 000
+                    novo_filename = "FL. 000 - TERMO DE ABERTURA.pdf"
+                    print(f"  > NOME DEFINIDO: Termo de Abertura -> '{novo_filename}'.")
+                elif folha_num == MAX_FOLHAS + 1:
+                    # Termo de Encerramento: FL. 301 (ou MAX_FOLHAS + 1)
+                    novo_filename = f"FL. {folha_num:03d} - TERMO DE ENCERRAMENTO.pdf"
+                    print(f"  > NOME DEFINIDO: Termo de Encerramento -> '{novo_filename}'.")
                 else:
-                    # Se o OCR falhar e NÃO houver correção manual, usa o nome de erro
-                    novo_filename = f"ERRO_OCR_{base_filename}.pdf"
-                    print(f"  > AVISO: OCR falhou e sem correção manual. Salvando com nome de erro: '{novo_filename}'.")
-                
-                output_path = os.path.join(output_dir, novo_filename)
+                    # Folha normal ou Verso: FL. 042.pdf ou FL. 042-verso.pdf
+                    novo_filename = f"FL. {folha_num:03d}{sufixo}.pdf"
+                    print(f"  > NOME DEFINIDO: Folha {folha_num:03d}{sufixo} -> '{novo_filename}'.")
+            
+            else:
+                # Fallback final se for None (OCR falhou e não se enquadrou como verso/termo)
+                novo_filename = f"ERRO_OCR_{base_filename}.pdf"
+                print(f"  > AVISO: OCR falhou e sem correção/verso. Salvando com nome de erro: '{novo_filename}'.")
+            
+            output_path = os.path.join(output_dir, novo_filename)
 
-                # --- 6. Conversão e Salvamento para PDF ---
-                img.save(output_path, "PDF", resolution=100.0)
-                
-                print(f"  > SUCESSO: Salva e convertida para PDF em '{output_path}'.")
+            # --- 6. Conversão e Salvamento para PDF ---
+            img.save(output_path, "PDF", resolution=100.0)
+            
+            print(f"  > SUCESSO: Salva e convertida para PDF em '{output_path}'.")
 
-            except Exception as e:
-                print(f"  > ERRO FATAL ao processar '{filename}': {e}")
-                print("  > Este arquivo foi ignorado.")
-
-        elif os.path.isdir(input_path):
-             print(f"Ignorando item: {filename} (É um subdiretório).")
-        else:
-             print(f"Ignorando item: {filename} (Não é um arquivo .jpg/.jpeg).")
+        except Exception as e:
+            print(f"  > ERRO FATAL ao processar '{filename}': {e}")
+            print("  > Este arquivo foi ignorado.")
 
     print("\nProcessamento de todas as imagens no diretório concluído.")
 
