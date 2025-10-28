@@ -8,12 +8,14 @@ import sys
 import io
 from typing import Optional, Dict, Tuple, Any, List
 import concurrent.futures 
-import threading # NOVO: Para não bloquear a GUI
-import queue # NOVO: Para comunicação thread-safe
+import threading # Para não bloquear a GUI
+import queue # Para comunicação thread-safe
 
 # --- CONFIGURAÇÃO E VARIÁVEIS GLOBAIS ---
 DEFAULT_MAX_FOLHAS = 300
 DEFAULT_PROCESSES = 4 
+# REGIÃO DE INTERESSE (ROI) para OCR: (X_min, Y_min, X_max, X_max) em escala de 0 a 1000
+# Coordenadas estimadas para o canto superior direito da página.
 OCR_ROI = (450, 50, 950, 250)
 LIMIAR_CARACTERES_VERSO = 250
 PSM_CONFIG = r'--oem 3 -l por --psm 6'
@@ -34,6 +36,7 @@ def _run_ocr_worker(input_path: str, max_folhas: int) -> Tuple[str, Optional[int
         img = Image.open(input_path)
 
         # 1. ROTAÇÃO INTELIGENTE
+        # Tenta rotacionar -90, se o OCR de ROI for melhor, mantém. Senão, tenta rotacionar +90.
         if img.width > img.height:
             img_neg90 = img.rotate(-90, expand=True)
             if verificar_sucesso_ocr_roi(img_neg90, OCR_ROI, PSM_CONFIG):
@@ -46,11 +49,11 @@ def _run_ocr_worker(input_path: str, max_folhas: int) -> Tuple[str, Optional[int
 
         # 3. Converter imagem (possivelmente rotacionada) para bytes
         img_byte_arr = io.BytesIO()
-        # Salva como PNG para evitar perda de qualidade na transmissão
+        # Salva como PNG para evitar perda de qualidade na transmissão entre processos
         img.save(img_byte_arr, format='PNG') 
         img_bytes = img_byte_arr.getvalue()
         
-        # 4. Retorna todos os dados
+        # 4. Retorna todos os dados para o thread principal
         return (filename, folha_num_ocr, full_ocr_text, img_bytes)
 
     except Exception as e:
@@ -74,6 +77,16 @@ def verificar_sucesso_ocr_roi(image: Image.Image, ocr_roi: tuple, psm_config: st
     except Exception:
         return False
 
+def extract_folha_num(text: str) -> Optional[int]:
+    """Extrai o número da folha de um texto usando regex."""
+    match = re.search(r'(FOLHA|FL)\s*[:.\s]*(\d+)', text.upper())
+    if match:
+        try:
+            return int(match.group(2))
+        except ValueError:
+            return None
+    return None
+
 def extrair_numero_folha_ocr_worker(image: Image.Image, max_folhas: int) -> Tuple[Optional[int], str]:
     """Extrai Termos Especiais e Números de Folha (Usado pelo worker)."""
     full_text = ""
@@ -83,8 +96,10 @@ def extrair_numero_folha_ocr_worker(image: Image.Image, max_folhas: int) -> Tupl
         upper_text = full_text.upper()
 
         if "TERMO DE ABERTURA" in upper_text or "TERMO DE INSTALAÇÃO" in upper_text:
+            # Retorna 0 para Termo de Abertura
             return 0, full_text
         if "TERMO DE ENCERRAMENTO" in upper_text:
+            # Retorna (max_folhas + 1) para Termo de Encerramento
             return max_folhas + 1, full_text
             
     except Exception:
@@ -101,14 +116,10 @@ def extrair_numero_folha_ocr_worker(image: Image.Image, max_folhas: int) -> Tupl
         
         cropped_image = image.crop(crop_box)
         text_roi = pytesseract.image_to_string(cropped_image, config=PSM_CONFIG)
-        upper_text_roi = text_roi.upper()
-
-        match = re.search(r'(FOLHA|FL)\s*[:.\s]*(\d+)', upper_text_roi)
-        if match:
-            folha_numero = int(match.group(2))
-            return folha_numero, full_text
         
-        return None, full_text
+        folha_numero = extract_folha_num(text_roi)
+        
+        return folha_numero, full_text
 
     except Exception:
         return None, full_text
@@ -182,12 +193,10 @@ class OCR_App:
         action_frame.grid_columnconfigure(0, weight=1)
         action_frame.grid_columnconfigure(1, weight=1)
 
-        # MUDANÇA: Chama o método que inicia o thread
         self.start_button = tk.Button(action_frame, text="INICIAR", bg="#4CAF50", fg="white", font=("Helvetica", 12, "bold"),
                                       command=self.start_processing_thread) 
         self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 10))
 
-        # O botão Encerrar AGORA funcionará porque a GUI não está bloqueada
         self.stop_button = tk.Button(action_frame, text="ENCERRAR", bg="#f44336", fg="white", font=("Helvetica", 12, "bold"),
                                      command=self.stop_processing, state=tk.DISABLED)
         self.stop_button.grid(row=0, column=1, sticky="ew")
@@ -221,14 +230,12 @@ class OCR_App:
         
     def set_controls_state(self, is_running: bool):
         """Alterna o estado dos botões e campos de entrada."""
-        # Atrasado para a thread principal (via after(0)) para segurança
         state = tk.DISABLED if is_running else tk.NORMAL
         self.start_button.config(state=tk.DISABLED if is_running else tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL if is_running else tk.DISABLED)
         
     def ask_manual_correction(self, filename: str) -> Optional[int]:
         """Abre uma nova janela (modal) para correção manual."""
-        # Mantido o mesmo código do modal, pois ele é bloqueante APENAS para o thread worker.
         modal = tk.Toplevel(self.master)
         modal.title("Correção Manual de Folha")
         modal.transient(self.master)
@@ -313,7 +320,7 @@ class OCR_App:
                 self.executor.shutdown(wait=False, cancel_futures=True) 
                 self.log("Tentativa de cancelamento de processos paralelos enviada.")
             
-            # O thread de processamento terminará assim que o ProcessPoolExecutor fechar.
+            # O thread de processamento terminará assim que o ProcessPoolExecutor fechar ou o loop terminar.
 
     def _cleanup_processing(self, is_interrupted=False):
         """Finaliza e limpa o estado de processamento (chamado pelo thread worker no fim)."""
@@ -336,7 +343,10 @@ class OCR_App:
 
     def processar_imagens_logic(self):
         """
-        Lógica principal de processamento (incluindo paralelismo), executada em um thread separado.
+        Lógica principal de processamento.
+        - Submete o OCR de forma paralela.
+        - Resgata os resultados de forma sequencial para garantir a ordem (FL. 001, FL. 002...).
+        - Executa a renomeação e salvamento imediatamente após receber cada resultado de OCR.
         """
         input_dir = self.input_dir_var.get()
         output_dir = self.output_dir_var.get()
@@ -367,7 +377,6 @@ class OCR_App:
             if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(('.jpg', '.jpeg'))
         ]
         arquivos_ordenados = sorted(arquivos_encontrados)
-        input_paths = [os.path.join(input_dir, f) for f in arquivos_ordenados]
         
         if not arquivos_ordenados:
             self.log("Nenhuma imagem JPG/JPEG encontrada no diretório de entrada.")
@@ -377,47 +386,130 @@ class OCR_App:
         self.log(f"Encontradas {len(arquivos_ordenados)} imagens. OCR paralelo usando {num_processes} processos.")
         self.log("-" * 60)
         
-        ocr_results: List[Tuple[str, Optional[int], str, bytes]] = []
+        file_to_future = {} # Mapeia filename para o objeto Future
         
-        # --- 3. ETAPA DE OCR PARALELO ---
-        self.log("Executando OCR em paralelo... Aguarde.")
+        # --- 3. ETAPA DE OCR PARALELO (SUBMISSÃO) ---
+        self.log("Submetendo todas as imagens para OCR em paralelo...")
         
         try:
             # Armazena o executor em uma variável de instância para que stop_processing possa acessá-lo
             with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as self.executor:
                 
-                future_to_file = {
-                    self.executor.submit(_run_ocr_worker, path, max_folhas): os.path.basename(path) 
-                    for path in input_paths
-                }
-
-                all_results_unordered: List[Tuple[str, Optional[int], str, bytes]] = []
-                for future in concurrent.futures.as_completed(future_to_file):
+                # Submete todas as tarefas e armazena os Futures
+                for filename in arquivos_ordenados:
+                    input_path = os.path.join(input_dir, filename)
+                    future = self.executor.submit(_run_ocr_worker, input_path, max_folhas)
+                    file_to_future[filename] = future
+                
+                self.log(f"{len(file_to_future)} tarefas submetidas. Iniciando processamento sequencial...")
+                self.log("\n" + "="*60)
+                self.log("ETAPA SEQUENCIAL: Resgate OCR, Rotação e Salvamento Imediato...")
+                self.log("="*60)
+                
+                # --- 4. ETAPA SEQUENCIAL: Resgate e Processamento Imediato ---
+                for filename in arquivos_ordenados:
+                    
                     if not self.is_processing:
-                        # Se a INTERRUPÇÃO foi solicitada, cancela o resto
-                        self.log("INTERRUPÇÃO DETECTADA no thread worker. Fechando o executor...")
-                        # Isto garante o cancelamento de futures pendentes
-                        self.executor.shutdown(wait=False, cancel_futures=True) 
+                        # Quebra o loop principal e forçará o desligamento do executor
+                        break 
+                        
+                    future = file_to_future[filename]
+                    
+                    try:
+                        # BLOQUEIA ATÉ QUE O RESULTADO OCR DESTA IMAGEM ESTEJA PRONTO
+                        self.log(f"\n--- Aguardando OCR de: {filename} ---")
+                        # O resultado do worker inclui: filename, folha_num_ocr, full_ocr_text, img_bytes
+                        filename_returned, folha_num_ocr, full_ocr_text, img_bytes = future.result() 
+                        
+                        self.log(f"  > Worker Concluído: {filename_returned} (Resultado OCR recebido).")
+                        
+                        # Inicia a lógica sequencial (conversão/renomeação) imediatamente
+
+                        # Reconstroi a imagem a partir dos bytes (já rotacionada e pronta)
+                        try:
+                            # Usa PNG, formato usado para salvar os bytes no worker
+                            img = Image.open(io.BytesIO(img_bytes)) 
+                        except Exception:
+                            self.log(f"  > ERRO: Falha ao reconstruir imagem para {filename}. Ignorando.")
+                            continue
+
+                        base_filename = os.path.splitext(filename)[0]
+                        folha_num = folha_num_ocr
+                        sufixo = ""
+
+                        if full_ocr_text.startswith("ERRO INTERNO NO WORKER:"):
+                            self.log(f"  > ERRO NO WORKER: {full_ocr_text}. Requer correção manual.")
+                            folha_num = None 
+
+                        if base_filename in self.correcoes_manuais:
+                            folha_num = self.correcoes_manuais[base_filename]
+                            self.log(f"  > CORREÇÃO MANUAL APLICADA: Forçado para Folha nº {folha_num}.")
+                        
+                        is_termo = (folha_num == 0 or folha_num == max_folhas + 1)
+                        
+                        if folha_num is None:
+                            texto_limpo = re.sub(r'\s+', '', full_ocr_text)
+                            
+                            if len(texto_limpo) < LIMIAR_CARACTERES_VERSO and self.ultima_folha_processada > 0 and not is_termo:
+                                folha_num = self.ultima_folha_processada
+                                sufixo = "-verso"
+                                self.log(f"  > AVISO: OCR falhou. Aplicando regra de VERSO: Folha nº {folha_num}{sufixo}.")
+                            else:
+                                self.log("!!! ERRO DE OCR DETECTADO - ABRINDO CORREÇÃO MANUAL !!!")
+                                
+                                # AQUI, o thread de processamento PÁRA e espera pela entrada do usuário.
+                                manual_num = self.ask_manual_correction(filename)
+                                
+                                if manual_num is not None:
+                                    folha_num = manual_num
+                                    self.correcoes_manuais[base_filename] = folha_num
+                                    self.log(f"  > MANUAL: Folha nº {folha_num} definida pelo usuário.")
+                                else:
+                                    folha_num = None 
+                                    self.log(f"  > IGNORADO: O arquivo será salvo com nome de erro.")
+
+                        if folha_num is not None and folha_num > 0 and folha_num <= max_folhas:
+                            # Atualiza a última folha processada para uso na próxima iteração ou Verso
+                            self.ultima_folha_processada = folha_num
+                            
+                        # --- 5. Definição do Nome do Arquivo ---
+                        if folha_num is not None:
+                            
+                            if folha_num == 0:
+                                novo_filename = "TERMO DE ABERTURA.pdf"
+                            elif folha_num == max_folhas + 1:
+                                novo_filename = f"TERMO DE ENCERRAMENTO.pdf" 
+                            else:
+                                novo_filename = f"FL. {folha_num:03d}{sufixo}.pdf"
+
+                            self.log(f"  > NOME DEFINIDO: '{novo_filename}'.")
+                        
+                        else:
+                            novo_filename = f"ERRO_OCR_{base_filename}.pdf"
+                            self.log(f"  > SALVANDO ERRO: Nome de erro aplicado: '{novo_filename}'.")
+                        
+                        output_path = os.path.join(output_dir, novo_filename)
+
+                        # --- 6. Conversão e Salvamento para PDF (IMEDIATO) ---
+                        try:
+                            img.save(output_path, "PDF", resolution=100.0)
+                            self.log(f"  > SUCESSO: Salva em '{output_path}'.")
+                        except Exception as e:
+                            self.log(f"  > ERRO FATAL ao salvar PDF para '{filename}': {e}")
+                            
+                    except concurrent.futures.CancelledError:
+                        self.log(f"\n--- Processamento de {filename} cancelado. ---")
+                        # Em caso de cancelamento, o loop será quebrado no próximo cheque de `is_processing`
+                        break
+                    except Exception as exc:
+                        self.log(f"\n--- ERRO CRÍTICO ao obter resultado para {filename}: {exc} ---")
+                        # Se ocorrer uma exceção crítica ao obter o resultado, tenta parar
+                        self.is_processing = False
                         break
                         
-                    try:
-                        result = future.result()
-                        all_results_unordered.append(result)
-                        self.log(f"  > Worker Concluído: {future_to_file[future]} (Resultado OCR bruto recebido).")
-                    except concurrent.futures.CancelledError:
-                        self.log(f"  > Worker Cancelado: {future_to_file[future]} foi cancelado.")
-                    except Exception as exc:
-                        self.log(f"  > Worker ERROR: {future_to_file[future]} gerou uma exceção: {exc}")
-                        
-                # Ordena os resultados com base na lista de arquivos original
-                filename_to_result = {res[0]: res for res in all_results_unordered}
-                for filename in arquivos_ordenados:
-                    if filename in filename_to_result:
-                        ocr_results.append(filename_to_result[filename])
-                    elif filename not in filename_to_result and self.is_processing:
-                         # Arquivo não foi processado (pode ter falhado ou não ter sido submetido/cancelado)
-                         # Se o processo não foi cancelado, assume um erro.
-                         ocr_results.append((filename, None, "ERRO: Worker falhou ou foi cancelado.", b''))
+                # Após o loop, se houve interrupção, garantir que o executor feche.
+                if not self.is_processing:
+                    self.executor.shutdown(wait=False, cancel_futures=True)
             
             # Limpa o executor após o bloco `with`
             self.executor = None 
@@ -427,97 +519,7 @@ class OCR_App:
             self._cleanup_processing()
             return
             
-        self.log("\n" + "="*60)
-        self.log("ETAPA DE OCR PARALELO CONCLUÍDA. Iniciando Renomeação Sequencial...")
-        self.log("="*60)
-        
-        # Se houve interrupção no meio do OCR, não faz a renomeação sequencial
-        if not self.is_processing:
-            self.log("Processamento interrompido. Nenhuma renomeação ou salvamento sequencial iniciado.")
-            self._cleanup_processing(is_interrupted=True)
-            return
-
-        # --- 4. ETAPA SEQUENCIAL: Lógica de Renomeação, Verso e Salvamento ---
-        
-        for filename, folha_num_ocr, full_ocr_text, img_bytes in ocr_results:
-            
-            if not self.is_processing:
-                break # Interrompe a lógica sequencial
-                
-            self.log(f"\n--- Processando Sequencialmente: {filename} ---")
-            
-            # Reconstroi a imagem a partir dos bytes (já rotacionada e pronta)
-            try:
-                # Usa PNG aqui, que foi o formato usado para salvar os bytes no worker
-                img = Image.open(io.BytesIO(img_bytes)) 
-            except Exception:
-                self.log(f"  > ERRO: Falha ao reconstruir imagem para {filename}. Ignorando.")
-                continue
-
-            base_filename = os.path.splitext(filename)[0]
-            folha_num = folha_num_ocr
-            sufixo = ""
-
-            if full_ocr_text.startswith("ERRO INTERNO NO WORKER:"):
-                 self.log(f"  > ERRO NO WORKER: {full_ocr_text}. Requer correção manual.")
-                 folha_num = None 
-
-            if base_filename in self.correcoes_manuais:
-                folha_num = self.correcoes_manuais[base_filename]
-                self.log(f"  > CORREÇÃO MANUAL APLICADA: Forçado para Folha nº {folha_num}.")
-            
-            is_termo = (folha_num == 0 or folha_num == max_folhas + 1)
-            
-            if folha_num is None:
-                texto_limpo = re.sub(r'\s+', '', full_ocr_text)
-                
-                if len(texto_limpo) < LIMIAR_CARACTERES_VERSO and self.ultima_folha_processada > 0 and not is_termo:
-                    folha_num = self.ultima_folha_processada
-                    sufixo = "-verso"
-                    self.log(f"  > AVISO: OCR falhou. Aplicando regra de VERSO: Folha nº {folha_num}{sufixo}.")
-                else:
-                    self.log("!!! ERRO DE OCR DETECTADO - ABRINDO CORREÇÃO MANUAL !!!")
-                    
-                    manual_num = self.ask_manual_correction(filename)
-                    
-                    if manual_num is not None:
-                        folha_num = manual_num
-                        self.correcoes_manuais[base_filename] = folha_num
-                        self.log(f"  > MANUAL: Folha nº {folha_num} definida pelo usuário.")
-                    else:
-                        folha_num = None 
-                        self.log(f"  > IGNORADO: O arquivo será salvo com nome de erro.")
-
-            if folha_num is not None and folha_num > 0 and folha_num <= max_folhas:
-                self.ultima_folha_processada = folha_num
-                
-            # --- 5. Definição do Nome do Arquivo ---
-            if folha_num is not None:
-                
-                if folha_num == 0:
-                    novo_filename = "TERMO DE ABERTURA.pdf"
-                elif folha_num == max_folhas + 1:
-                    novo_filename = f"TERMO DE ENCERRAMENTO.pdf" 
-                else:
-                    novo_filename = f"FL. {folha_num:03d}{sufixo}.pdf"
-
-                self.log(f"  > NOME DEFINIDO: '{novo_filename}'.")
-            
-            else:
-                novo_filename = f"ERRO_OCR_{base_filename}.pdf"
-                self.log(f"  > SALVANDO ERRO: Nome de erro aplicado: '{novo_filename}'.")
-            
-            output_path = os.path.join(output_dir, novo_filename)
-
-            # --- 6. Conversão e Salvamento para PDF ---
-            try:
-                img.save(output_path, "PDF", resolution=100.0)
-                self.log(f"  > SUCESSO: Salva em '{output_path}'.")
-            except Exception as e:
-                self.log(f"  > ERRO FATAL ao salvar PDF para '{filename}': {e}")
-        
         # --- FIM DO PROCESSAMENTO ---
-        # Chama a limpeza, indicando se houve interrupção ou não
         self._cleanup_processing(is_interrupted=not self.is_processing)
 
 if __name__ == "__main__":
