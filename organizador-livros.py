@@ -501,9 +501,9 @@ class OCR_App:
                         if folha_num is not None:
                             
                             if folha_num == 0:
-                                novo_filename = "FL. 000 - TERMO DE ABERTURA.pdf"
+                                novo_filename = "TERMO DE ABERTURA.pdf"
                             elif folha_num == max_folhas + 1:
-                                novo_filename = f"FL. {max_folhas:03d} - TERMO DE ENCERRAMENTO.pdf" 
+                                novo_filename = f"TERMO DE ENCERRAMENTO.pdf" 
                             else:
                                 novo_filename = f"FL. {folha_num:03d}{sufixo}.pdf"
 
