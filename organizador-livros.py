@@ -2,91 +2,142 @@ from PIL import Image
 import os
 import re
 import pytesseract
-from typing import Optional
+from typing import Optional, Dict
 
 # --- CONFIGURAÇÃO ---
 # Mude este caminho para o DIRETÓRIO (pasta) que contém suas imagens
 # EX: './livros/23'
-INPUT_DIR = './livros/23'
+INPUT_DIR = './livros/26'
 # Novo diretório onde as imagens processadas serão salvas (será criado se não existir)
-OUTPUT_DIR = './livros/23_editados'
+OUTPUT_DIR = './livros/26_editados'
 # Número máximo de folhas no livro para determinar o "Termo de Encerramento"
-# Exemplo: Livro com folhas de 001 a 300, o encerramento é 301.
 MAX_FOLHAS = 300
+
+# REGIÃO DE INTERESSE (ROI) para OCR: (X_min, Y_min, X_max, Y_max) em escala de 0 a 1000
+# Esta área é OTIMIZADA para encontrar o número da folha (geralmente no cabeçalho).
+OCR_ROI = (450, 50, 950, 250)
+
 # Caminho para o executável do Tesseract (ajuste se necessário, especialmente no Windows)
-# Exemplo Windows: r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-# Em Linux/macOS geralmente não é necessário, pois está no PATH
 # pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract' # Descomente e ajuste se necessário
-# --------------------
+
+# Configuração de OCR (PSM - Page Segmentation Mode):
+# 6: Assume um bloco uniforme de texto (bom para a área recortada).
+# -l por: Define o idioma português.
+PSM_CONFIG = r'--oem 3 -l por --psm 6'
+
+# --- CORREÇÕES MANUAIS (FALLBACK CRÍTICO) ---
+# Dicionário para corrigir erros de OCR conhecidos e persistentes em imagens específicas.
+# Chave: Nome base do arquivo JPG (sem extensão).
+# Valor: Número da folha correto (int).
+CORRECOES_MANUAIS: Dict[str, int] = {
+    # ERRO_OCR_IMG_20251015_113139 deveria ser Folha 70
+    # Se a imagem IMG_20251015_135831 for o Termo de Abertura, adicione aqui (retorna 0)
+    # Exemplo: "IMG_20251015_135831": 0,
+    # Se a imagem for o Termo de Encerramento (FL. 301), adicione aqui (retorna 301)
+    # Exemplo: "ERRO_OCR_IMG_20251015_120736": MAX_FOLHAS + 1,
+}
+
+# ----------------------------------------------------
 
 
 def extrair_numero_folha_ocr(image: Image.Image) -> Optional[int]:
     """
-    Extrai o texto de uma imagem usando OCR e tenta encontrar o número da folha.
-    Retorna o número da folha (int) ou None se não for encontrado.
+    Tenta identificar Termos Especiais (Abertura/Encerramento) usando OCR na imagem
+    completa. Se não for um Termo Especial, recorta a imagem para o ROI
+    e executa o OCR para o número da folha.
+    
+    Retorna o número da folha (int):
+      - 0 para Termo de Abertura
+      - MAX_FOLHAS + 1 para Termo de Encerramento
+      - Número da folha para páginas normais
+      - None se não for encontrado
     """
+    global PSM_CONFIG, OCR_ROI
+
+    # --- 1. Tentar identificar Termos Especiais usando OCR na IMAGEM COMPLETA ---
     try:
-        # Usa OCR para extrair texto da imagem
-        text = pytesseract.image_to_string(image, lang='por')
-        
-        # Converte o texto para maiúsculas para facilitar a busca
-        upper_text = text.upper()
-        
-        # 1. Verifica TERMO DE ABERTURA
+        # Usar uma configuração de PSM para página completa (PSM 3)
+        full_text = pytesseract.image_to_string(image, config=r'--oem 3 -l por --psm 3')
+        upper_text = full_text.upper()
+
+        # 1a. Verifica Termo de Abertura
         if "TERMO DE ABERTURA" in upper_text or "TERMO DE INSTALAÇÃO" in upper_text:
-            return 0  # Convenção: Abertura é a folha 000 (anterior a 001)
-
-        # 2. Verifica TERMO DE ENCERRAMENTO
-        # Para ser mais robusto, também verifica se o documento é muito grande,
-        # assumindo que é a folha após a última folha numerada (MAX_FOLHAS + 1)
+            print("  > OCR ENCONTRADO (Página Completa): Termo de Abertura.")
+            return 0
+        
+        # 1b. Verifica Termo de Encerramento
         if "TERMO DE ENCERRAMENTO" in upper_text:
-            return MAX_FOLHAS + 1  # Convenção: Encerramento é a folha após a última numerada
+            print("  > OCR ENCONTRADO (Página Completa): Termo de Encerramento.")
+            return MAX_FOLHAS + 1 
+            
+    except pytesseract.TesseractNotFoundError:
+        print("  > ERRO CRÍTICO DE OCR: O Tesseract OCR não foi encontrado. Verifique o caminho.")
+        return None
+    except Exception as e:
+        print(f"  > ERRO durante a tentativa de OCR na página completa: {e}")
+        # Continua para a próxima etapa (OCR por ROI) em caso de erro não crítico
 
-        # 3. Procura por padrões de número de folha (ex: FOLHA: 42, LIVRO: 23, FOLHA 42)
-        # Regex para capturar números após "FOLHA" ou "FL"
-        match = re.search(r'(FOLHA|FL)\s*[:\s]*(\d+)', upper_text)
+    # --- 2. Tentar identificar Número de Folha usando OCR na REGIÃO DE INTERESSE (ROI) ---
+    # 2a. Definir o box de corte em PIXELS
+    img_width, img_height = image.size
+    
+    # Converte as coordenadas (0-1000) para pixels
+    x_min = int(img_width * OCR_ROI[0] / 1000)
+    y_min = int(img_height * OCR_ROI[1] / 1000)
+    x_max = int(img_width * OCR_ROI[2] / 1000)
+    y_max = int(img_height * OCR_ROI[3] / 1000)
+    
+    crop_box = (x_min, y_min, x_max, y_max)
+    
+    try:
+        # 2b. Recortar a imagem
+        cropped_image = image.crop(crop_box)
+        
+        # 2c. Executar o OCR apenas na área recortada (usando PSM 6 otimizado)
+        text_roi = pytesseract.image_to_string(cropped_image, config=PSM_CONFIG)
+        upper_text_roi = text_roi.upper()
+
+        # 2d. Procura por padrões de número de folha (ex: FOLHA: 42, FL. 42)
+        match = re.search(r'(FOLHA|FL)\s*[:.\s]*(\d+)', upper_text_roi)
 
         if match:
             # Captura o grupo 2 da regex, que é o número da folha
             folha_numero = int(match.group(2))
-            print(f"  > OCR ENCONTRADO: Folha nº {folha_numero}")
+            print(f"  > OCR SUCESSO (ROI): Folha nº {folha_numero}")
             return folha_numero
-
-        print("  > OCR NÃO ENCONTROU um número de folha claro, Abertura ou Encerramento.")
+        
+        print(f"  > OCR FALHA: Não encontrou um número de folha claro no ROI: '{upper_text_roi.strip().replace('\n', ' ')}'")
         return None
 
-    except pytesseract.TesseractNotFoundError:
-        print("  > ERRO CRÍTICO DE OCR: O Tesseract OCR não foi encontrado.")
-        print("  > Certifique-se de que o Tesseract está instalado e que o caminho (pytesseract.pytesseract.tesseract_cmd) está correto na CONFIGURAÇÃO.")
-        return None
     except Exception as e:
-        print(f"  > ERRO durante o processamento OCR: {e}")
+        print(f"  > ERRO durante o processamento OCR no ROI: {e}")
         return None
 
 
 def processar_imagens_no_diretorio(input_dir, output_dir):
     """
-    Percorre o diretório de entrada, processa apenas arquivos .jpg, aplica OCR,
-    renomeia e salva como .pdf no diretório de saída.
+    Percorre o diretório de entrada, processa arquivos .jpg/.jpeg, aplica OCR com ROI,
+    aplica correções manuais (fallback) e salva como .pdf no diretório de saída.
     """
     print(f"Iniciando processamento no diretório: {input_dir}")
 
-    # 1. Verifica se o caminho de entrada é um diretório
+    # 1. Verifica e cria o diretório de saída
     if not os.path.isdir(input_dir):
         print(f"ERRO: O caminho '{input_dir}' não é um diretório válido. Por favor, configure a variável INPUT_DIR corretamente.")
         return
 
-    # 2. Cria o diretório de saída se ele não existir
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         print(f"Diretório de saída criado: {output_dir}")
 
-    # 3. Itera sobre todos os itens dentro do diretório de entrada
+    # 2. Itera sobre todos os itens dentro do diretório de entrada
     for filename in os.listdir(input_dir):
-        # Constrói o caminho completo para o arquivo de entrada
         input_path = os.path.join(input_dir, filename)
 
-        # 4. Filtra: verifica se é um ARQUIVO e se possui a extensão .jpg ou .jpeg
+        # Remove a extensão para usar na verificação de correções
+        base_filename = os.path.splitext(filename)[0]
+
+        # 3. Filtra: verifica se é um ARQUIVO e se possui a extensão .jpg ou .jpeg
         if os.path.isfile(input_path) and filename.lower().endswith(('.jpg', '.jpeg')):
 
             print(f"\nProcessando arquivo: {filename}...")
@@ -94,40 +145,48 @@ def processar_imagens_no_diretorio(input_dir, output_dir):
             try:
                 img = Image.open(input_path)
 
-                # --- 5. ROTAÇÃO (Lógica existente) ---
+                # --- ROTAÇÃO ---
                 if img.width > img.height:
-                    print("  > Orientação: Paisagem. Rotacionando 90 graus...")
-                    img = img.rotate(-90, expand=True) # Alterado para -90 (anti-horário) para evitar virar a página de cabeça para baixo
+                    print("  > Orientação: Paisagem. Rotacionando -90 graus...")
+                    img = img.rotate(-90, expand=True)
                 else:
                     print("  > Orientação: Retrato ou Quadrada. Sem rotação.")
                 
-                # --- 6. OCR e Extração de Número da Folha ---
-                folha_num = extrair_numero_folha_ocr(img)
-
+                # --- OCR e Extração de Número da Folha ---
+                folha_num_ocr = extrair_numero_folha_ocr(img)
+                folha_num = folha_num_ocr
+                
+                # --- CORREÇÃO MANUAL / OVERRIDE ---
+                # Verifica se o arquivo tem uma correção manual definida.
+                if base_filename in CORRECOES_MANUAIS:
+                    folha_num_corrigido = CORRECOES_MANUAIS[base_filename]
+                    print(f"  > CORREÇÃO MANUAL APLICADA: '{base_filename}' forçado para Folha nº {folha_num_corrigido}.")
+                    folha_num = folha_num_corrigido # Sobrescreve o resultado do OCR
+                
+                # --- 5. Definição do Nome do Arquivo ---
                 if folha_num is not None:
-                    # 7. Formatação do Nome do Arquivo
+                    
                     if folha_num == 0:
                         # Termo de Abertura: FL. 000
-                        novo_filename = "FL. 000.pdf"
-                        print(f"  > IDENTIFICADO: Termo de Abertura. Renomeando para '{novo_filename}'.")
+                        novo_filename = "TERMO DE ABERTURA.pdf"
+                        print(f"  > NOME DEFINIDO: Termo de Abertura -> '{novo_filename}'.")
                     elif folha_num == MAX_FOLHAS + 1:
                         # Termo de Encerramento: FL. 301 (ou MAX_FOLHAS + 1)
-                        novo_filename = f"FL. {folha_num:03d}.pdf"
-                        print(f"  > IDENTIFICADO: Termo de Encerramento. Renomeando para '{novo_filename}'.")
+                        novo_filename = f"TERMO DE ENCERRAMENTO.pdf"
+                        print(f"  > NOME DEFINIDO: Termo de Encerramento -> '{novo_filename}'.")
                     else:
-                        # Folha normal: FL. 042
+                        # Folha normal: FL. 042. O :03d garante 3 dígitos.
                         novo_filename = f"FL. {folha_num:03d}.pdf"
-                        print(f"  > NOME DEFINIDO: Folha {folha_num}. Renomeando para '{novo_filename}'.")
+                        print(f"  > NOME DEFINIDO: Folha {folha_num:03d} -> '{novo_filename}'.")
+                
                 else:
-                    # Se o OCR falhar, usa o nome original com um prefixo de erro
-                    novo_filename = f"ERRO_OCR_{filename.split('.')[0]}.pdf"
-                    print(f"  > AVISO: OCR falhou. Salvando com nome de erro: '{novo_filename}'.")
+                    # Se o OCR falhar e NÃO houver correção manual, usa o nome de erro
+                    novo_filename = f"ERRO_OCR_{base_filename}.pdf"
+                    print(f"  > AVISO: OCR falhou e sem correção manual. Salvando com nome de erro: '{novo_filename}'.")
                 
                 output_path = os.path.join(output_dir, novo_filename)
 
-                # --- 8. Conversão e Salvamento para PDF ---
-                # Salva a imagem processada como PDF
-                # A conversão de JPG para PDF é feita de forma nativa pela PIL
+                # --- 6. Conversão e Salvamento para PDF ---
                 img.save(output_path, "PDF", resolution=100.0)
                 
                 print(f"  > SUCESSO: Salva e convertida para PDF em '{output_path}'.")
