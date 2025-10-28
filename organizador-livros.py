@@ -7,9 +7,9 @@ from typing import Optional, Dict
 # --- CONFIGURAÇÃO ---
 # Mude este caminho para o DIRETÓRIO (pasta) que contém suas imagens
 # EX: './livros/23'
-INPUT_DIR = './livros/26'
+INPUT_DIR = './livros/23'
 # Novo diretório onde as imagens processadas serão salvas (será criado se não existir)
-OUTPUT_DIR = './livros/26_editados'
+OUTPUT_DIR = './livros/23_editados'
 # Número máximo de folhas no livro para determinar o "Termo de Encerramento"
 MAX_FOLHAS = 300
 
@@ -31,6 +31,13 @@ PSM_CONFIG = r'--oem 3 -l por --psm 6'
 # Valor: Número da folha correto (int).
 CORRECOES_MANUAIS: Dict[str, int] = {
     # ERRO_OCR_IMG_20251015_113139 deveria ser Folha 70
+    "IMG_20251015_113139": 70,
+    # ERRO_OCR_IMG_20251015_113525 deveria ser Folha 100
+    "IMG_20251015_113525": 100,
+    # FL. 002 (IMG_20251015_115652) deveria ser Folha 218
+    "IMG_20251015_115652": 218,
+    # FL. 004 (IMG_20251015_112749) deveria ser Folha 43,
+    "IMG_20251015_112749": 43,
     # Se a imagem IMG_20251015_135831 for o Termo de Abertura, adicione aqui (retorna 0)
     # Exemplo: "IMG_20251015_135831": 0,
     # Se a imagem for o Termo de Encerramento (FL. 301), adicione aqui (retorna 301)
@@ -38,6 +45,35 @@ CORRECOES_MANUAIS: Dict[str, int] = {
 }
 
 # ----------------------------------------------------
+
+
+def verificar_sucesso_ocr_roi(image: Image.Image, ocr_roi: tuple, psm_config: str) -> bool:
+    """
+    Verifica se um padrão de número de folha válido pode ser encontrado
+    na Região de Interesse (ROI) da imagem.
+    Retorna True se o padrão for encontrado, False caso contrário.
+    """
+    img_width, img_height = image.size
+    
+    # Converte as coordenadas (0-1000) para pixels
+    x_min = int(img_width * ocr_roi[0] / 1000)
+    y_min = int(img_height * ocr_roi[1] / 1000)
+    x_max = int(img_width * ocr_roi[2] / 1000)
+    y_max = int(img_height * ocr_roi[3] / 1000)
+    
+    crop_box = (x_min, y_min, x_max, y_max)
+    
+    try:
+        cropped_image = image.crop(crop_box)
+        text_roi = pytesseract.image_to_string(cropped_image, config=psm_config)
+        upper_text_roi = text_roi.upper()
+        
+        # Procura por padrões de número de folha (ex: FOLHA: 42, FL. 42)
+        match = re.search(r'(FOLHA|FL)\s*[:.\s]*(\d+)', upper_text_roi)
+        return match is not None
+    except Exception:
+        # Falha no OCR ou corte. Considera como insucesso na rotação.
+        return False
 
 
 def extrair_numero_folha_ocr(image: Image.Image) -> Optional[int]:
@@ -116,9 +152,10 @@ def extrair_numero_folha_ocr(image: Image.Image) -> Optional[int]:
 
 def processar_imagens_no_diretorio(input_dir, output_dir):
     """
-    Percorre o diretório de entrada, processa arquivos .jpg/.jpeg, aplica OCR com ROI,
-    aplica correções manuais (fallback) e salva como .pdf no diretório de saída.
+    Percorre o diretório de entrada, processa arquivos .jpg/.jpeg, aplica rotação
+    inteligente, OCR, correções manuais (fallback) e salva como .pdf.
     """
+    global OCR_ROI, PSM_CONFIG
     print(f"Iniciando processamento no diretório: {input_dir}")
 
     # 1. Verifica e cria o diretório de saída
@@ -145,10 +182,25 @@ def processar_imagens_no_diretorio(input_dir, output_dir):
             try:
                 img = Image.open(input_path)
 
-                # --- ROTAÇÃO ---
+                # --- ROTAÇÃO INTELIGENTE BASEADA NA ORIENTAÇÃO E OCR ---
                 if img.width > img.height:
-                    print("  > Orientação: Paisagem. Rotacionando -90 graus...")
-                    img = img.rotate(-90, expand=True)
+                    # Imagem em Paisagem (deve ser rotacionada)
+                    
+                    # 1. Tentar -90 graus (virada para a esquerda)
+                    img_neg90 = img.rotate(-90, expand=True)
+                    if verificar_sucesso_ocr_roi(img_neg90, OCR_ROI, PSM_CONFIG):
+                        img = img_neg90
+                        print("  > Orientação: Paisagem. Rotacionado em -90 graus (Para a esquerda) via OCR.")
+                    else:
+                        # 2. Tentar +90 graus (virada para a direita)
+                        img_pos90 = img.rotate(90, expand=True)
+                        if verificar_sucesso_ocr_roi(img_pos90, OCR_ROI, PSM_CONFIG):
+                            img = img_pos90
+                            print("  > Orientação: Paisagem. Rotacionado em +90 graus (Para a direita) via OCR.")
+                        else:
+                            # 3. Fallback (Mantém a rotação de -90, como era o padrão)
+                            img = img_neg90
+                            print("  > Orientação: Paisagem. OCR de rotação falhou. Fallback para -90 graus.")
                 else:
                     print("  > Orientação: Retrato ou Quadrada. Sem rotação.")
                 
@@ -168,11 +220,11 @@ def processar_imagens_no_diretorio(input_dir, output_dir):
                     
                     if folha_num == 0:
                         # Termo de Abertura: FL. 000
-                        novo_filename = "TERMO DE ABERTURA.pdf"
+                        novo_filename = "FL. 000 - TERMO DE ABERTURA.pdf"
                         print(f"  > NOME DEFINIDO: Termo de Abertura -> '{novo_filename}'.")
                     elif folha_num == MAX_FOLHAS + 1:
                         # Termo de Encerramento: FL. 301 (ou MAX_FOLHAS + 1)
-                        novo_filename = f"TERMO DE ENCERRAMENTO.pdf"
+                        novo_filename = f"FL. {folha_num:03d} - TERMO DE ENCERRAMENTO.pdf"
                         print(f"  > NOME DEFINIDO: Termo de Encerramento -> '{novo_filename}'.")
                     else:
                         # Folha normal: FL. 042. O :03d garante 3 dígitos.
