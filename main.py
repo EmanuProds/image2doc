@@ -5,7 +5,7 @@ import os
 # Tenta importar as classes e dependências principais
 try:
     import pytesseract
-    from src.interface import OCR_Application
+    from src.interface.entrypoint import Image2PDFApp
 except ImportError as e:
     print(f"ERRO: Não foi possível importar as dependências necessárias: {e}")
     sys.exit(1)
@@ -26,7 +26,7 @@ def main():
         sys.exit(1)
 
     # Inicia o loop principal do GTK
-    app = OCR_Application()
+    app = Image2PDFApp()
     exit_status = app.run(sys.argv)
     sys.exit(exit_status)
 
