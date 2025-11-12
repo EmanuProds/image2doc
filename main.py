@@ -1,5 +1,5 @@
 """
-Image2PDF - Modern Document Processing Application
+Image2DOC - Modern Document Processing Application
 
 Main entry point for the GTK4 application that converts document images
 to organized PDFs using OCR technology.
@@ -46,7 +46,7 @@ def check_dependencies():
 
 def main():
     """Main application entry point."""
-    logger.info("Starting Image2PDF application")
+    logger.info("Starting Image2DOC application")
 
     # Check dependencies
     if not check_dependencies():
@@ -56,10 +56,10 @@ def main():
     # Import and run application
     try:
         from gi.repository import Adw, Gio
-        from src.interface.main_window import MainWindow
+        from src.interface.main import MainWindow
 
         app = Adw.Application.new(
-            application_id="com.jtp.image2pdf",
+            application_id="com.jtp.image2doc",
             flags=Gio.ApplicationFlags.FLAGS_NONE
         )
 
