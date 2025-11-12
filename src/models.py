@@ -1,5 +1,5 @@
 """
-Data models and domain entities for the Image2PDF application.
+Data models and domain entities for the Image2DOC application.
 Uses modern Python features like dataclasses and enums for clean, type-safe code.
 """
 from dataclasses import dataclass, field

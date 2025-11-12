@@ -1,11 +1,11 @@
 """
 Application configuration using modern data structures.
-Centralized configuration management for the Image2PDF application.
+Centralized configuration management for the Image2DOC application.
 """
 from .models import OCRConfig, ProcessingConfig
 
 # Application metadata
-APP_ID = "com.jtp.image2pdf"
+APP_ID = "com.jtp.image2doc"
 APP_VERSION = "1.0.0"
 
 # Default configurations

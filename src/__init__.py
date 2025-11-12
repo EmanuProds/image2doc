@@ -1,5 +1,5 @@
 """
-Image2PDF - Document Processing Application
+Image2DOC - Document Processing Application
 
 A modern GTK4 application for converting document images to organized PDFs
 using OCR technology with intelligent page detection and manual correction support.
