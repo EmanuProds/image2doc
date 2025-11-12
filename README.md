@@ -120,14 +120,14 @@ src/
 │   ├── file_service.py     # File operations and caching
 │   ├── ocr_service.py      # OCR processing and image manipulation
 │   └── processing_service.py # Main processing coordination
-├── interface/          # Modern GTK4/Libadwaita UI layer
-│   ├── main_window.py      # Main window with navigation
-│   ├── home_page.py        # Processing interface
-│   ├── settings_page.py    # Preferences/settings page
-│   ├── logs_page.py        # Advanced logging interface
-│   ├── about_dialog.py     # Modern about dialog
-│   └── correction_dialog.py # Manual correction dialog
-├── ocr.py              # Legacy OCR functions (for compatibility)
+├── interface/          # GTK4 UI layer
+│   ├── entrypoint.py       # Application initialization
+│   ├── gui.py              # Main window and navigation
+│   ├── home.py             # Processing interface
+│   ├── pref.py             # Preferences/settings page
+│   ├── logs.py             # Logging interface
+│   └── about.py            # About dialog
+├── ocr.py              # Legacy OCR functions (deprecated)
 └── __init__.py         # Package initialization
 ```
 
@@ -135,8 +135,16 @@ src/
 
 ### Project Structure
 - `main.py`: Application entry point
-- `src/`: Main source code
-- `old/`: Legacy code (deprecated)
+- `src/`: Main source code (modern architecture)
+- `README.md`: English documentation
+- `README.pt-BR.md`: Portuguese documentation
+
+### Recent Changes (v1.0.0)
+- **🏗️ Architecture Refactoring**: Complete modernization with service-oriented design
+- **📁 File Organization**: Renamed interface files for consistency (removed `_page`/`_dialog` suffixes)
+- **🏷️ Project Renaming**: Changed from "Image2PDF" to "Image2DOC" for clarity
+- **🧹 Code Cleanup**: Removed deprecated files and legacy code
+- **📚 Documentation**: Updated READMEs with current project structure
 
 ### Key Technologies
 - **GTK4**: Modern GUI framework

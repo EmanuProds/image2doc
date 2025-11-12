@@ -120,14 +120,14 @@ src/
 │   ├── file_service.py     # Operações de arquivo e cache
 │   ├── ocr_service.py      # Processamento OCR e manipulação de imagem
 │   └── processing_service.py # Coordenação principal do processamento
-├── interface/          # Camada UI GTK4/Libadwaita moderna
-│   ├── main_window.py      # Janela principal com navegação
-│   ├── home_page.py        # Interface de processamento
-│   ├── settings_page.py    # Página de preferências/configurações
-│   ├── logs_page.py        # Interface avançada de logging
-│   ├── about_dialog.py     # Diálogo Sobre moderno
-│   └── correction_dialog.py # Diálogo de correção manual
-├── ocr.py              # Funções OCR legadas (para compatibilidade)
+├── interface/          # Camada UI GTK4
+│   ├── entrypoint.py       # Inicialização da aplicação
+│   ├── gui.py              # Janela principal e navegação
+│   ├── home.py             # Interface de processamento
+│   ├── pref.py             # Página de preferências/configurações
+│   ├── logs.py             # Interface de logging
+│   └── about.py            # Diálogo Sobre
+├── ocr.py              # Funções OCR legadas (descontinuadas)
 └── __init__.py         # Inicialização do pacote
 ```
 
@@ -135,8 +135,16 @@ src/
 
 ### Estrutura do Projeto
 - `main.py`: Ponto de entrada da aplicação
-- `src/`: Código fonte principal
-- `old/`: Código legado (descontinuado)
+- `src/`: Código fonte principal (arquitetura moderna)
+- `README.md`: Documentação em inglês
+- `README.pt-BR.md`: Documentação em português
+
+### Mudanças Recentes (v1.0.0)
+- **🏗️ Refatoração da Arquitetura**: Modernização completa com design orientado a serviços
+- **📁 Organização de Arquivos**: Renomeação dos arquivos da interface para consistência (removidos sufixos `_page`/`_dialog`)
+- **🏷️ Renomeação do Projeto**: Mudança de "Image2PDF" para "Image2DOC" para maior clareza
+- **🧹 Limpeza do Código**: Remoção de arquivos descontinuados e código legado
+- **📚 Documentação**: READMEs atualizados com estrutura atual do projeto
 
 ### Tecnologias Principais
 - **GTK4**: Framework GUI moderno
