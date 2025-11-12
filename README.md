@@ -108,18 +108,27 @@ The application creates organized PDFs with the following naming convention:
 
 ## Architecture
 
+The application follows a modern, service-oriented architecture with clear separation of concerns:
+
 ```
 src/
-├── core.py          # Main processing logic and parallel OCR
-├── ocr.py           # OCR functions and image processing
-├── config.py        # Application configuration constants
-└── interface/
-    ├── entrypoint.py    # GTK application initialization
-    ├── gui.py           # Main window and navigation
-    ├── home.py          # Processing interface
-    ├── pref.py          # Preferences/settings page
-    ├── logs.py          # Logging interface
-    └── about.py         # About dialog
+├── models.py           # Data models and domain entities (dataclasses & enums)
+├── exceptions.py       # Custom exception hierarchy
+├── config.py           # Application configuration
+├── core.py             # Legacy processing logic (backward compatibility)
+├── services/           # Modern service layer
+│   ├── file_service.py     # File operations and caching
+│   ├── ocr_service.py      # OCR processing and image manipulation
+│   └── processing_service.py # Main processing coordination
+├── interface/          # GTK4 UI layer
+│   ├── entrypoint.py       # Application initialization
+│   ├── gui.py              # Main window and navigation
+│   ├── home.py             # Processing interface
+│   ├── pref.py             # Preferences/settings page
+│   ├── logs.py             # Logging interface
+│   └── about.py            # About dialog
+├── ocr.py              # Legacy OCR functions (deprecated)
+└── __init__.py         # Package initialization
 ```
 
 ## Development

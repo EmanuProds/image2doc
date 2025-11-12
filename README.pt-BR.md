@@ -108,18 +108,27 @@ A aplicação cria PDFs organizados com a seguinte convenção de nomenclatura:
 
 ## Arquitetura
 
+A aplicação segue uma arquitetura moderna orientada a serviços com clara separação de responsabilidades:
+
 ```
 src/
-├── core.py          # Lógica principal de processamento e OCR paralelo
-├── ocr.py           # Funções OCR e processamento de imagem
-├── config.py        # Constantes de configuração da aplicação
-└── interface/
-    ├── entrypoint.py    # Inicialização da aplicação GTK
-    ├── gui.py           # Janela principal e navegação
-    ├── home.py          # Interface de processamento
-    ├── pref.py          # Página de preferências/configurações
-    ├── logs.py          # Interface de logging
-    └── about.py         # Diálogo Sobre
+├── models.py           # Modelos de dados e entidades de domínio (dataclasses & enums)
+├── exceptions.py       # Hierarquia de exceções customizadas
+├── config.py           # Configuração da aplicação
+├── core.py             # Lógica de processamento legado (compatibilidade)
+├── services/           # Camada de serviços moderna
+│   ├── file_service.py     # Operações de arquivo e cache
+│   ├── ocr_service.py      # Processamento OCR e manipulação de imagem
+│   └── processing_service.py # Coordenação principal do processamento
+├── interface/          # Camada UI GTK4
+│   ├── entrypoint.py       # Inicialização da aplicação
+│   ├── gui.py              # Janela principal e navegação
+│   ├── home.py             # Interface de processamento
+│   ├── pref.py             # Página de preferências/configurações
+│   ├── logs.py             # Interface de logging
+│   └── about.py            # Diálogo Sobre
+├── ocr.py              # Funções OCR legadas (descontinuadas)
+└── __init__.py         # Inicialização do pacote
 ```
 
 ## Desenvolvimento
