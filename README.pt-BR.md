@@ -120,14 +120,14 @@ src/
 │   ├── file_service.py     # Operações de arquivo e cache
 │   ├── ocr_service.py      # Processamento OCR e manipulação de imagem
 │   └── processing_service.py # Coordenação principal do processamento
-├── interface/          # Camada UI GTK4
-│   ├── entrypoint.py       # Inicialização da aplicação
-│   ├── gui.py              # Janela principal e navegação
-│   ├── home.py             # Interface de processamento
-│   ├── pref.py             # Página de preferências/configurações
-│   ├── logs.py             # Interface de logging
-│   └── about.py            # Diálogo Sobre
-├── ocr.py              # Funções OCR legadas (descontinuadas)
+├── interface/          # Camada UI GTK4/Libadwaita moderna
+│   ├── main_window.py      # Janela principal com navegação
+│   ├── home_page.py        # Interface de processamento
+│   ├── settings_page.py    # Página de preferências/configurações
+│   ├── logs_page.py        # Interface avançada de logging
+│   ├── about_dialog.py     # Diálogo Sobre moderno
+│   └── correction_dialog.py # Diálogo de correção manual
+├── ocr.py              # Funções OCR legadas (para compatibilidade)
 └── __init__.py         # Inicialização do pacote
 ```
 
