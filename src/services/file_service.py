@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class FileService:
-    """Service for handling file operations in the Image2PDF application."""
+    """Service for handling file operations in the Image2DOC application."""
 
     SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg'}
 

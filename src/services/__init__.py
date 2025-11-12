@@ -1,5 +1,5 @@
 """
-Services package for Image2PDF application.
+Services package for Image2DOC application.
 
 This package contains the core business logic services that handle
 document processing, OCR operations, and file management.
