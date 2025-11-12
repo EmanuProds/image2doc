@@ -1,27 +1,31 @@
-# Definição de todas as constantes e variáveis de configuração utilizadas no backend e na API.
+"""
+Application configuration using modern data structures.
+Centralized configuration management for the Image2PDF application.
+"""
+from .models import OCRConfig, ProcessingConfig
 
-# --- Parâmetros de Processamento (Compatíveis com a GUI) ---
-
-# Máximo padrão de folhas do livro para o Termo de Encerramento.
-MAX_FOLHAS_DEFAULT = 300
-
-# Número padrão de processos/workers a serem usados no ProcessPoolExecutor.
-NUM_PROCESSES_DEFAULT = 4 
-
-# --- Configurações da Aplicação ---
+# Application metadata
 APP_ID = "com.jtp.image2pdf"
 APP_VERSION = "1.0.0"
 
-# --- CONFIGURAÇÃO DE OCR ---
-# REGIÃO DE INTERESSE (ROI) para OCR: (X_min, Y_min, X_max, Y_max) em escala de 0 a 1000
-OCR_ROI = (450, 50, 950, 250)
-# Define a área de interesse para procurar o número da folha (em escala 0-1000).
+# Default configurations
+DEFAULT_OCR_CONFIG = OCRConfig(
+    roi=(450, 50, 950, 250),  # Region of interest for page number detection
+    language="por",            # Portuguese language for OCR
+    psm_mode=6,               # Page segmentation mode for uniform text blocks
+    oem_mode=3,               # OCR Engine Mode
+    min_chars_for_front_page=250  # Minimum characters to consider as front page
+)
 
-LIMIAR_CARACTERES_VERSO = 250
-# Número mínimo de caracteres para uma página ser considerada 'Frente'. Abaixo disso, é tratada como 'Verso' se o OCR falhar.
+DEFAULT_PROCESSING_CONFIG = ProcessingConfig(
+    max_pages=300,            # Default maximum pages for closing term detection
+    num_processes=4           # Default number of parallel processes
+)
 
-PSM_CONFIG = r'--oem 3 -l por --psm 6'
-# Configuração do Tesseract: Engine Mode (OEM 3) + Language (Português) + Page Segmentation Mode (PSM 6: Bloco único uniforme).
-
+# Legacy constants for backward compatibility (will be removed)
+MAX_FOLHAS_DEFAULT = DEFAULT_PROCESSING_CONFIG.max_pages
+NUM_PROCESSES_DEFAULT = DEFAULT_PROCESSING_CONFIG.num_processes
+OCR_ROI = DEFAULT_OCR_CONFIG.roi
+LIMIAR_CARACTERES_VERSO = DEFAULT_OCR_CONFIG.min_chars_for_front_page
+PSM_CONFIG = DEFAULT_OCR_CONFIG.psm_config
 CORRECOES_MANUAIS = {}
-# Dicionário para armazenar correções manuais durante a execução (chave: nome base do arquivo, valor: número da folha).

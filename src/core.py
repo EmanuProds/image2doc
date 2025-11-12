@@ -1,51 +1,25 @@
-# Contém a lógica sequencial de processamento, cache e coordenação do ProcessPoolExecutor.
-import os
-import re
-import io
-import concurrent.futures 
-from typing import Set, List, Dict, Callable, Optional
+"""
+Legacy core module - maintained for backward compatibility.
+New code should use the services in src/services/ instead.
+"""
+import logging
+from pathlib import Path
+from typing import Dict, Callable, Optional
 
-from PIL import Image
-
-# Importa as configurações e as funções worker
 from . import config
-from .ocr import _run_ocr_worker
+from .models import ProcessingConfig, OCRConfig
+from .services.processing_service import ProcessingService
 
+logger = logging.getLogger(__name__)
 
-# BLOCO DE FUNÇÕES DE MANIPULAÇÃO DE ARQUIVOS
-def load_processed_sheets(output_dir: str, max_folhas: int) -> Set[int]:
+# Legacy function for backward compatibility
+def custom_locate_doc(image, max_folhas: int) -> Optional[int]:
     """
-    Carrega os números de folha (FL. XXX) dos PDFs já processados na pasta de saída (Cache).
-    
-    Args:
-        output_dir (str): Caminho para o diretório de saída.
-        max_folhas (int): O número máximo de folhas do livro.
-        
-    Returns:
-        Set[int]: Um conjunto de números de folha que já foram processados (0=Abertura, max_folhas+1=Encerramento).
+    Legacy function - kept for compatibility.
+    New code should not use this function.
     """
-    processed_sheets = set()
-    if not os.path.isdir(output_dir):
-        return processed_sheets
-        
-    for filename in os.listdir(output_dir):
-        if filename.lower().endswith('.pdf'):
-            # Padrão para FL. XXX
-            match_fl = re.search(r'FL\. (\d{3})(?:-verso)?\.pdf', filename.upper())
-            if match_fl:
-                try:
-                    folha_num = int(match_fl.group(1))
-                    processed_sheets.add(folha_num) 
-                except ValueError:
-                    pass
-            
-            # Padrão para Termo de Abertura/Encerramento
-            if 'TERMO DE ABERTURA' in filename.upper():
-                processed_sheets.add(0)
-            if 'TERMO DE ENCERRAMENTO' in filename.upper():
-                processed_sheets.add(max_folhas + 1)
-                
-    return processed_sheets
+    return None
+
 
 
 # Bloco principal de processamento
@@ -271,6 +245,76 @@ def run_processing_logic(
         
     # Limpeza final
     _cleanup_processing(is_interrupted=not get_is_processing_state())
-    
+
     # Retorna o último valor processado para a GUI
     return ultima_folha_processada
+
+
+def run_processing_logic_modern(
+    input_dir: str,
+    output_dir: str,
+    max_folhas: int,
+    num_processes: int,
+    ultima_folha_processada: int,
+    correcoes_manuais: Dict[str, int],
+    log_callback: Callable[[str], None],
+    ask_manual_correction_callback: Callable[[str], Optional[int]],
+    set_is_processing_state: Callable[[bool], None],
+    get_is_processing_state: Callable[[], bool]
+) -> Optional[int]:
+    """
+    Modern processing logic using the new service architecture.
+
+    This is the recommended way to process documents. The legacy function above
+    is maintained for backward compatibility.
+    """
+    try:
+        # Create modern configurations
+        processing_config = ProcessingConfig(
+            max_pages=max_folhas,
+            num_processes=num_processes,
+            input_dir=Path(input_dir),
+            output_dir=Path(output_dir)
+        )
+
+        ocr_config = config.DEFAULT_OCR_CONFIG
+
+        # Create processing service
+        service = ProcessingService(processing_config, ocr_config, log_callback)
+
+        # Convert legacy callback to modern format
+        def modern_ask_correction(filename: str, last_page: int, max_pages: int) -> Optional[Dict]:
+            """Convert legacy callback to modern format."""
+            result = ask_manual_correction_callback(filename)
+            if result is not None:
+                return {"action": "continue", "folha": result}
+            return None
+
+        # Process documents
+        result = service.process_documents(
+            get_processing_state=get_is_processing_state,
+            set_processing_state=set_is_processing_state,
+            ask_manual_correction=modern_ask_correction
+        )
+
+        # Apply manual corrections from legacy dict
+        for filename, page_num in correcoes_manuais.items():
+            service.manual_corrections[filename] = page_num
+
+        return result.last_processed_page
+
+    except Exception as e:
+        logger.error(f"Modern processing failed, falling back to legacy: {e}")
+        # Fallback to legacy implementation
+        return run_processing_logic(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            max_folhas=max_folhas,
+            num_processes=num_processes,
+            ultima_folha_processada=ultima_folha_processada,
+            correcoes_manuais=correcoes_manuais,
+            log_callback=log_callback,
+            ask_manual_correction_callback=ask_manual_correction_callback,
+            set_is_processing_state=set_is_processing_state,
+            get_is_processing_state=get_is_processing_state
+        )
