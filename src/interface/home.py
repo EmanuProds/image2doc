@@ -1,376 +1,394 @@
-import os
-import queue
-import threading
-import sys
-from typing import Optional, Dict, Callable
+"""
+Modern home page with responsive design and clean UI.
+Uses Adw.StatusPage, Adw.Clamp, and proper state management.
+"""
+import logging
+from pathlib import Path
+from typing import Optional, Callable, Dict
 
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Gio, Gdk, Pango
+from gi.repository import Gtk, Adw, Gio, GLib, GObject
 
-# Importa o backend (core) e o diálogo About
-from .. import core
-from .about import AboutDialog 
+from ..models import ProcessingConfig, OCRConfig
+from ..services.processing_service import ProcessingService
 
-# --- CLASSE DE DIÁLOGO DE CORREÇÃO --
-class CorrectionDialog(Adw.MessageDialog):
-    """Diálogo Modal GTK para Intervenção Manual (OCR)."""
-    def __init__(self, parent: Gtk.Window, filename: str, last_folha: int, max_folhas: int):
-        # Usamos apenas o nome base do arquivo para uma UI mais limpa
-        self.filename = filename
-        body_text = f"Arquivo: <b>{os.path.basename(filename)}</b>\nÚltima Folha Processada: FL. {last_folha}"
-        
-        super().__init__(
-            parent=parent, 
-            modal=True,
-            heading="Correção Manual Necessária",
-            body=body_text,
-            default_show_close_button=False # Apenas as ações definidas abaixo
-        )
-        
-        # Adiciona a ActionRow com o campo de input
-        row = Adw.ActionRow.new()
-        row.set_title("Próxima Folha (FL.)")
-        row.set_subtitle(f"Valor sugerido: {last_folha + 1}")
+logger = logging.getLogger(__name__)
 
-        self.input_entry = Gtk.Entry.new()
-        self.input_entry.set_input_purpose(Gtk.InputPurpose.DIGITS)
-        self.input_entry.set_text(str(last_folha + 1))
-        
-        # Adiciona o entry ao fim da ActionRow
-        row.add_suffix(self.input_entry)
-        row.set_activatable_widget(self.input_entry)
 
-        # Adiciona a ActionRow ao conteúdo do diálogo
-        self.set_extra_child(row)
-
-        # Botões de Ação
-        self.add_response("confirm", "Aplicar Correção e Continuar")
-        self.add_response("skip", "Pular Correção (Usar Sugestão)")
-        self.add_response("stop", "Parar Processamento")
-
-        # Conecta o evento de fechar (Enter/Escape)
-        self.set_response_enabled("confirm", True)
-        self.set_default_response("confirm")
-
-    def get_correction_data(self) -> Optional[int]:
-        """Retorna o valor corrigido inserido pelo usuário."""
-        try:
-            return int(self.input_entry.get_text().strip())
-        except ValueError:
-            return None
-
-# --- CLASSE DA PÁGINA INICIAL ---
-class HomePage(Gtk.Box): # Alterado de Adw.StatusPage para Gtk.Box
+class HomePage(Gtk.Box):
     """
-    Página principal da aplicação, contendo os seletores de I/O, 
-    botões de controle e toda a lógica de interação com o backend.
+    Modern home page for document processing.
+
+    Features:
+    - Clean status page design
+    - Responsive layout with Adw.Clamp
+    - Visual feedback for all states
+    - Proper signal emission for state changes
     """
-    def __init__(self, parent_window: Gtk.Window, log_callback: Callable, get_prefs_data: Callable):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=24) # Inicializa Gtk.Box
-        self.parent_window = parent_window
-        self.log_callback = log_callback
-        self.get_prefs_data = get_prefs_data # Callback para buscar dados de pref.py
-        
-        # Removidas as chamadas set_title/set_description/set_icon_name
-        
-        # --- Variáveis de Estado ---
-        self.input_dir: Optional[str] = None
-        self.output_dir: Optional[str] = None
-        self.processing_thread: Optional[threading.Thread] = None
+
+    __gsignals__ = {
+        'processing-started': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'processing-finished': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'show-toast': (GObject.SignalFlags.RUN_FIRST, None, (str, int)),
+    }
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+
+        # Initialize state
+        self.input_dir: Optional[Path] = None
+        self.output_dir: Optional[Path] = None
+        self.processing_service: Optional[ProcessingService] = None
         self._is_processing = False
-        self.correcoes_manuais: Dict[str, int] = {} # {filename: folha_corrigida}
-        self.ultima_folha_processada: Optional[int] = None
 
-        # --- Interface (Gtk.Box como conteúdo principal) ---
-        main_vbox = Gtk.Box.new(Gtk.Orientation.VERTICAL, 24)
-        main_vbox.set_margin_top(24)
-        main_vbox.set_margin_bottom(24)
-        main_vbox.set_margin_start(24)
-        main_vbox.set_margin_end(24)
-        main_vbox.set_halign(Gtk.Align.CENTER)
-        
-        # Lista de Ações (Seletores de Pasta)
-        list_box = Gtk.ListBox.new()
-        list_box.add_css_class("boxed-list")
-        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        # Setup UI
+        self._setup_ui()
 
-        # 1. Seletor de Pasta de Entrada
-        self.input_row = self._create_dir_selector_row(
-            title="Pasta de Entrada", 
-            subtitle="Selecione o diretório com as imagens a serem processadas.",
-            callback=lambda widget: self._on_select_folder_clicked("input")
-        )
-        list_box.append(self.input_row)
+    def _setup_ui(self) -> None:
+        """Setup the main UI structure."""
+        # Main clamp for responsive design
+        clamp = Adw.Clamp.new()
+        clamp.set_maximum_size(600)
+        clamp.set_tightening_threshold(500)
 
-        # 2. Seletor de Pasta de Saída
-        self.output_row = self._create_dir_selector_row(
-            title="Pasta de Saída", 
-            subtitle="Diretório onde os PDFs e relatórios serão salvos.",
-            callback=lambda widget: self._on_select_folder_clicked("output")
-        )
-        list_box.append(self.output_row)
-        
-        main_vbox.append(list_box)
-        
-        # --- Controles de Status e Ação ---
-        
-        # Título da Página (Adicionado manualmente para manter a estética)
-        title_label = Gtk.Label.new("Image2PDF Converter")
-        title_label.add_css_class("title-1")
-        title_label.set_margin_bottom(12)
-        main_vbox.prepend(title_label)
+        # Main box
+        main_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 24)
+        main_box.set_margin_top(24)
+        main_box.set_margin_bottom(24)
+        main_box.set_margin_start(24)
+        main_box.set_margin_end(24)
+        main_box.set_valign(Gtk.Align.CENTER)
 
-        # Descrição da Página (Adicionado manualmente)
-        desc_label = Gtk.Label.new("Converta imagens de documentos para PDFs organizados com correção OCR.")
-        desc_label.add_css_class("body")
-        desc_label.set_wrap(True)
-        main_vbox.prepend(desc_label)
+        # Status page for initial state
+        self.status_page = Adw.StatusPage.new()
+        self.status_page.set_title("Image2DOC Converter")
+        self.status_page.set_description("Convert document images to organized PDFs with OCR")
+        self.status_page.set_icon_name("document-open-symbolic")
+        self.status_page.set_vexpand(True)
 
-        # Icone (Adicionado manualmente)
-        icon_image = Gtk.Image.new_from_icon_name("folder-documents-symbolic")
-        icon_image.set_icon_size(Gtk.IconSize.LARGE)
-        icon_image.set_margin_bottom(12)
-        main_vbox.prepend(icon_image)
+        # Setup button
+        setup_button = Gtk.Button.new_with_label("Get Started")
+        setup_button.add_css_class("suggested-action")
+        setup_button.add_css_class("pill")
+        setup_button.connect("clicked", self._on_setup_clicked)
+        self.status_page.set_child(setup_button)
 
-        # Label de Status (para feedback rápido)
-        self.status_label = Gtk.Label.new("Aguardando seleção de diretórios...")
+        # Processing view (hidden initially)
+        self.processing_box = self._create_processing_view()
+        self.processing_box.set_visible(False)
+
+        # Add views to main box
+        main_box.append(self.status_page)
+        main_box.append(self.processing_box)
+
+        clamp.set_child(main_box)
+        self.append(clamp)
+
+    def _create_processing_view(self) -> Gtk.Box:
+        """Create the processing interface view."""
+        box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 24)
+
+        # Directory selection section
+        dir_section = self._create_directory_section()
+        box.append(dir_section)
+
+        # Progress section
+        progress_section = self._create_progress_section()
+        box.append(progress_section)
+
+        # Action buttons
+        buttons_section = self._create_buttons_section()
+        box.append(buttons_section)
+
+        return box
+
+    def _create_directory_section(self) -> Adw.PreferencesGroup:
+        """Create directory selection section."""
+        group = Adw.PreferencesGroup.new()
+        group.set_title("Document Directories")
+        group.set_description("Select input and output directories for processing")
+
+        # Input directory row
+        self.input_row = Adw.ActionRow.new()
+        self.input_row.set_title("Input Directory")
+        self.input_row.set_subtitle("Select folder containing images")
+        self.input_row.set_activatable(True)
+
+        input_button = Gtk.Button.new_from_icon_name("folder-open-symbolic")
+        input_button.set_valign(Gtk.Align.CENTER)
+        input_button.connect("clicked", self._on_select_input_dir)
+        self.input_row.add_suffix(input_button)
+        self.input_row.set_activatable_widget(input_button)
+
+        # Output directory row
+        self.output_row = Adw.ActionRow.new()
+        self.output_row.set_title("Output Directory")
+        self.output_row.set_subtitle("Select folder for PDF output")
+        self.output_row.set_activatable(True)
+
+        output_button = Gtk.Button.new_from_icon_name("folder-open-symbolic")
+        output_button.set_valign(Gtk.Align.CENTER)
+        output_button.connect("clicked", self._on_select_output_dir)
+        self.output_row.add_suffix(output_button)
+        self.output_row.set_activatable_widget(output_button)
+
+        group.add(self.input_row)
+        group.add(self.output_row)
+
+        return group
+
+    def _create_progress_section(self) -> Adw.PreferencesGroup:
+        """Create progress display section."""
+        group = Adw.PreferencesGroup.new()
+        group.set_title("Processing Status")
+
+        # Progress bar
+        self.progress_bar = Gtk.ProgressBar.new()
+        self.progress_bar.set_show_text(True)
+        self.progress_bar.set_text("Ready")
+        self.progress_bar.set_fraction(0.0)
+
+        # Status label
+        self.status_label = Gtk.Label.new("Select directories to begin")
+        self.status_label.add_css_class("body")
         self.status_label.set_wrap(True)
-        self.status_label.add_css_class("heading")
-        main_vbox.append(self.status_label)
+        self.status_label.set_halign(Gtk.Align.START)
 
-        # Botão Iniciar/Parar
-        self.start_button = Gtk.Button.new_with_label("Iniciar Processamento")
-        self.start_button.add_css_class("suggested-action")
-        self.start_button.connect("clicked", self._on_start_stop_clicked)
-        main_vbox.append(self.start_button)
-        
-        # Adiciona a Gtk.Box principal ao Gtk.Box da HomePage (self)
-        self.set_halign(Gtk.Align.CENTER)
-        self.set_valign(Gtk.Align.CENTER)
-        self.append(main_vbox)
+        # Progress box
+        progress_box = Gtk.Box.new(Gtk.Orientation.VERTICAL, 12)
+        progress_box.append(self.progress_bar)
+        progress_box.append(self.status_label)
 
-        # Inicializa o estado dos controles
-        self.set_controls_state(False)
+        group.set_header_suffix(progress_box)
+        return group
 
+    def _create_buttons_section(self) -> Gtk.Box:
+        """Create action buttons section."""
+        box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 12)
+        box.set_halign(Gtk.Align.CENTER)
 
-    # --- Métodos de Criação de UI (Helper) ---
+        # Start/Stop button
+        self.action_button = Gtk.Button.new_with_label("Start Processing")
+        self.action_button.add_css_class("suggested-action")
+        self.action_button.add_css_class("pill")
+        self.action_button.connect("clicked", self._on_action_clicked)
 
-    def _create_dir_selector_row(self, title: str, subtitle: str, callback: Callable) -> Adw.ActionRow:
-        """Cria uma ActionRow com um botão de seleção de pasta."""
-        row = Adw.ActionRow.new()
-        row.set_title(title)
-        row.set_subtitle(subtitle)
-        
-        button = Gtk.Button.new_from_icon_name("folder-open-symbolic")
-        button.connect("clicked", callback)
-        
-        row.add_suffix(button)
-        row.set_activatable_widget(button)
-        return row
+        # Settings button
+        settings_button = Gtk.Button.new_with_label("Settings")
+        settings_button.add_css_class("flat")
+        settings_button.connect("clicked", self._on_settings_clicked)
 
-    # --- Lógica de Callbacks da UI (Botões) ---
+        box.append(settings_button)
+        box.append(self.action_button)
 
-    def _on_select_folder_clicked(self, type: str):
-        """Abre o diálogo de seleção de pasta para Input ou Output."""
+        return box
+
+    def _on_setup_clicked(self, button: Gtk.Button) -> None:
+        """Handle setup button click."""
+        self.status_page.set_visible(False)
+        self.processing_box.set_visible(True)
+
+    def _on_select_input_dir(self, button: Gtk.Button) -> None:
+        """Handle input directory selection."""
+        self._select_directory("input")
+
+    def _on_select_output_dir(self, button: Gtk.Button) -> None:
+        """Handle output directory selection."""
+        self._select_directory("output")
+
+    def _select_directory(self, dir_type: str) -> None:
+        """Select a directory using file dialog."""
         dialog = Gtk.FileDialog.new()
+        dialog.set_title(f"Select {dir_type.title()} Directory")
         dialog.set_modal(True)
-        dialog.set_title(f"Selecione a Pasta de {'Entrada' if type == 'input' else 'Saída'}")
-        
-        # Configura o tipo de seleção como pasta
-        if hasattr(Gtk.FileDialog, 'set_select_folder'): # GTK 4.10+
-            dialog.set_select_folder(True)
-        else: # Fallback para versões mais antigas
-             print("Aviso: Versão do GTK inferior à 4.10. Usando fallback.")
 
         def on_select(dialog, result):
             try:
                 folder = dialog.select_folder_finish(result)
-                path = folder.get_path()
-                
-                if type == "input":
+                path = Path(folder.get_path())
+
+                if dir_type == "input":
                     self.input_dir = path
-                    self.input_row.set_subtitle(f"Entrada: {path}")
-                    self.log_callback(f"Pasta de Entrada Selecionada: {path}")
-                elif type == "output":
-                    self.output_dir = path
-                    self.output_row.set_subtitle(f"Saída: {path}")
-                    self.log_callback(f"Pasta de Saída Selecionada: {path}")
-                    
-                self.set_controls_state(self._is_processing)
-            
-            except Exception as e:
-                # Ocorre quando o usuário cancela o diálogo
-                if "Gio.IOErrorEnum.CANCELLED" not in str(e):
-                    self.log_callback(f"Erro ao selecionar pasta: {e}", is_error=True)
-
-        dialog.select_folder(self.parent_window, None, on_select)
-
-    def _on_start_stop_clicked(self, widget: Gtk.Button):
-        """Lida com o clique no botão Iniciar/Parar."""
-        if self._is_processing:
-            # Lógica de Parada
-            self._is_processing = False
-            self.set_controls_state(False)
-            self.log_callback("Pedido de parada enviado ao backend...", is_error=True)
-            # O backend (no thread) deve respeitar o estado _is_processing
-        else:
-            # Lógica de Início
-            if not self.input_dir or not self.output_dir:
-                self.log_callback("ERRO: Selecione as pastas de Entrada e Saída.", is_error=True)
-                return
-
-            self._is_processing = True
-            self.set_controls_state(True)
-            self.log_callback("--- INICIANDO PROCESSAMENTO ---")
-            
-            # Obtém as preferências da página de configurações
-            prefs = self.get_prefs_data() 
-            self.max_folhas = prefs.get('max_folhas')
-            self.num_processes = prefs.get('num_processes')
-
-            # Validação de Preferências
-            if self.max_folhas is None or self.num_processes is None:
-                 self.log_callback("ERRO: Configurações de Max Folhas ou Processos Inválidas (devem ser números inteiros).", is_error=True)
-                 self._is_processing = False
-                 self.set_controls_state(False)
-                 return
-
-            # Inicia o processamento em um novo thread
-            self.processing_thread = threading.Thread(target=self._run_processing_thread)
-            self.processing_thread.start()
-
-    # --- Callbacks para o Backend (Thread Principal) ---
-
-    def log(self, message: str, is_error: bool = False):
-        """Callback que o backend usará para logar mensagens na UI."""
-        self.log_callback(message, is_error)
-
-    def ask_manual_correction(self, filename: str, last_folha: int, max_folhas: int) -> Dict[str, int]:
-        """
-        Callback que o backend usa para solicitar intervenção manual.
-        
-        Retorna um dicionário com a correção ou o comando de parada.
-        O diálogo é exibido na thread principal via GLib.idle_add/GLib.timeout_add.
-        """
-        response_queue = queue.Queue()
-
-        def show_dialog_and_wait():
-            dialog = CorrectionDialog(
-                parent=self.parent_window, 
-                filename=filename, 
-                last_folha=last_folha, 
-                max_folhas=max_folhas
-            )
-            response = dialog.run()
-            
-            # Mapeia a resposta do diálogo para o resultado do backend
-            result = {}
-            if response == "confirm":
-                corrigido = dialog.get_correction_data()
-                if corrigido is not None:
-                    # Registra a correção para o arquivo
-                    self.correcoes_manuais[filename] = corrigido
-                    result = {"action": "continue", "folha": corrigido}
+                    self.input_row.set_subtitle(f"📁 {path.name}")
+                    self.emit("show-toast", f"Input directory selected: {path.name}", 2)
                 else:
-                    self.log_callback("Valor de correção inválido. Parando processamento.", is_error=True)
-                    result = {"action": "stop"}
-            elif response == "skip":
-                # Pula a correção, usa o valor sugerido (last_folha + 1)
-                self.correcoes_manuais[filename] = last_folha + 1
-                result = {"action": "continue", "folha": last_folha + 1}
-            elif response == "stop":
-                self._is_processing = False # Seta o estado para parar
-                result = {"action": "stop"}
-            
-            dialog.destroy()
-            response_queue.put(result)
-            return GLib.SOURCE_REMOVE
+                    self.output_dir = path
+                    self.output_row.set_subtitle(f"📁 {path.name}")
+                    self.emit("show-toast", f"Output directory selected: {path.name}", 2)
 
-        # Executa o diálogo na thread principal e espera o resultado
-        GLib.idle_add(show_dialog_and_wait)
-        
-        # Bloqueia a thread do backend até que a resposta seja recebida
-        return response_queue.get()
+                self._update_action_button_state()
 
-    def update_status_label(self, final_ultima_folha: int):
-        """Atualiza a label de status ao final do processamento (thread-safe)."""
-        if final_ultima_folha > 0:
-            self.status_label.set_label(f"Processamento Concluído! Última folha processada: FL. {final_ultima_folha}")
+            except Exception as e:
+                logger.warning(f"Directory selection cancelled: {e}")
+
+        dialog.select_folder(self.get_root(), None, on_select)
+
+    def _on_action_clicked(self, button: Gtk.Button) -> None:
+        """Handle start/stop action button."""
+        if self._is_processing:
+            self._stop_processing()
         else:
-            self.status_label.set_label("Processamento Concluído! Nenhuma folha processada.")
-        self.set_controls_state(False)
+            self._start_processing()
 
-    # --- Lógica de Controle da UI ---
+    def _on_settings_clicked(self, button: Gtk.Button) -> None:
+        """Handle settings button click."""
+        # This will be handled by the parent window navigation
+        pass
 
-    def set_controls_state(self, is_running: bool):
-        """
-        Habilita/Desabilita controles e altera o botão de Iniciar/Parar.
-        Isto deve ser chamado APENAS na thread principal (via GLib.idle_add).
-        """
-        self._is_processing = is_running
-        
-        self.input_row.set_sensitive(not is_running)
-        self.output_row.set_sensitive(not is_running)
-        # O botão About também deve ser desativado, mas está na janela principal
-
-        if is_running:
-            self.start_button.set_label("Parar Processamento (Aguarde...)")
-            self.start_button.remove_css_class("suggested-action")
-            self.start_button.add_css_class("destructive-action")
-            self.status_label.set_label("Processando, aguarde intervenção manual se necessário...")
-        else:
-            self.start_button.set_label("Iniciar Processamento")
-            self.start_button.remove_css_class("destructive-action")
-            self.start_button.add_css_class("suggested-action")
-            if not self.input_dir or not self.output_dir:
-                self.status_label.set_label("Aguardando seleção de diretórios...")
-            
-    # --- Lógica de Threading (Chama o Backend) ---
-
-    def _run_processing_thread(self):
-        """
-        Função executada em um thread separado para chamar o backend (core.py).
-        TODA a interação com a UI deve ser feita via callbacks/GLib.idle_add.
-        """
-        self.log_callback("Iniciando thread de processamento...")
-        
-        def get_is_processing_state() -> bool:
-            """Permite que o backend verifique o estado de parada."""
-            return self._is_processing
-
-        def set_is_processing_state_wrapper(is_running: bool):
-            """
-            Permite que o backend chame uma parada de processamento (is_running=False)
-            de forma thread-safe (via GLib.idle_add).
-            """
-            GLib.idle_add(self.set_controls_state, not is_running)
+    def _start_processing(self) -> None:
+        """Start document processing."""
+        if not self._can_start_processing():
+            return
 
         try:
-            # CHAMADA CRÍTICA AO BACKEND (FUNCIONALIDADE MANTIDA)
-            final_ultima_folha = core.run_processing_logic(
+            # Create configuration
+            processing_config = ProcessingConfig(
+                max_pages=300,  # TODO: Get from settings
+                num_processes=4,  # TODO: Get from settings
                 input_dir=self.input_dir,
-                output_dir=self.output_dir,
-                max_folhas=self.max_folhas,
-                num_processes=self.num_processes,
-                log_callback=self.log,
-                ask_manual_correction_callback=self.ask_manual_correction,
-                ultima_folha_processada=self.ultima_folha_processada or 0, 
-                correcoes_manuais=self.correcoes_manuais,
-                get_is_processing_state=get_is_processing_state,
-                set_is_processing_state=set_is_processing_state_wrapper, 
+                output_dir=self.output_dir
             )
 
-            if final_ultima_folha is not None:
-                GLib.idle_add(self.update_status_label, final_ultima_folha)
-                
-            self.log("--- PROCESSAMENTO CONCLUÍDO ---\n")
-        
+            ocr_config = OCRConfig()  # TODO: Get from settings
+
+            # Create processing service
+            self.processing_service = ProcessingService(
+                processing_config, ocr_config, self._log_message
+            )
+
+            # Update UI state
+            self._is_processing = True
+            self.emit("processing-started")
+
+            self.action_button.set_label("Stop Processing")
+            self.action_button.remove_css_class("suggested-action")
+            self.action_button.add_css_class("destructive-action")
+
+            self.progress_bar.set_text("Initializing...")
+            self.status_label.set_text("Starting document processing...")
+
+            # Disable directory selection
+            self.input_row.set_sensitive(False)
+            self.output_row.set_sensitive(False)
+
+            # Start processing in thread
+            GLib.Thread.new("processing", self._run_processing_thread)
+
         except Exception as e:
-            self.log(f"\n--- ERRO CRÍTICO NO BACKEND: {e} ---", is_error=True)
-            import traceback
-            self.log(f"Detalhes do Erro:\n{traceback.format_exc()}", is_error=True)
-        finally:
-             # Garante que os controles voltem ao estado de repouso
-            GLib.idle_add(self.set_controls_state, False)
+            logger.error(f"Failed to start processing: {e}")
+            self.emit("show-toast", f"Failed to start processing: {str(e)}", 5)
+
+    def _stop_processing(self) -> None:
+        """Stop document processing."""
+        self._is_processing = False
+        self.status_label.set_text("Stopping processing...")
+        self.emit("show-toast", "Stopping processing...", 2)
+
+    def _run_processing_thread(self) -> None:
+        """Run processing in a separate thread."""
+        def get_processing_state():
+            return self._is_processing
+
+        def set_processing_state(is_processing):
+            self._is_processing = is_processing
+
+        def ask_correction(filename, last_page, max_pages):
+            # TODO: Implement manual correction dialog
+            return {"action": "skip", "folha": last_page + 1}
+
+        try:
+            result = self.processing_service.process_documents(
+                get_processing_state=get_processing_state,
+                set_processing_state=set_processing_state,
+                ask_manual_correction=ask_correction
+            )
+
+            GLib.idle_add(self._on_processing_complete, result)
+
+        except Exception as e:
+            GLib.idle_add(self._on_processing_error, str(e))
+
+    def _on_processing_complete(self, result) -> None:
+        """Handle processing completion."""
+        self._is_processing = False
+        self.emit("processing-finished")
+
+        # Update UI
+        self.action_button.set_label("Start Processing")
+        self.action_button.remove_css_class("destructive-action")
+        self.action_button.add_css_class("suggested-action")
+
+        self.progress_bar.set_fraction(1.0)
+        self.progress_bar.set_text("Complete")
+
+        self.status_label.set_text(
+            f"Processing complete! Processed {result.total_pages} pages."
+        )
+
+        # Re-enable directory selection
+        self.input_row.set_sensitive(True)
+        self.output_row.set_sensitive(True)
+
+        self.emit("show-toast", "Processing completed successfully!", 3)
+
+    def _on_processing_error(self, error: str) -> None:
+        """Handle processing error."""
+        self._is_processing = False
+        self.emit("processing-finished")
+
+        # Update UI
+        self.action_button.set_label("Start Processing")
+        self.action_button.remove_css_class("destructive-action")
+        self.action_button.add_css_class("suggested-action")
+
+        self.progress_bar.set_text("Error")
+        self.status_label.set_text(f"Processing failed: {error}")
+
+        # Re-enable directory selection
+        self.input_row.set_sensitive(True)
+        self.output_row.set_sensitive(True)
+
+        self.emit("show-toast", f"Processing failed: {error}", 5)
+
+    def _can_start_processing(self) -> bool:
+        """Check if processing can be started."""
+        if not self.input_dir:
+            self.emit("show-toast", "Please select an input directory", 3)
+            return False
+
+        if not self.output_dir:
+            self.emit("show-toast", "Please select an output directory", 3)
+            return False
+
+        if self.input_dir == self.output_dir:
+            self.emit("show-toast", "Input and output directories must be different", 3)
+            return False
+
+        return True
+
+    def _update_action_button_state(self) -> None:
+        """Update action button state based on current configuration."""
+        can_start = self._can_start_processing()
+        self.action_button.set_sensitive(can_start and not self._is_processing)
+
+    def _log_message(self, message: str, is_error: bool = False) -> None:
+        """Log a message (callback for processing service)."""
+        # Update status label with latest message
+        if not is_error:
+            GLib.idle_add(self.status_label.set_text, message)
+
+    def set_processing_state(self, is_processing: bool) -> None:
+        """Set processing state (called by parent window)."""
+        self._is_processing = is_processing
+        self._update_action_button_state()
+
+        if is_processing:
+            self.action_button.set_label("Stop Processing")
+            self.action_button.remove_css_class("suggested-action")
+            self.action_button.add_css_class("destructive-action")
+        else:
+            self.action_button.set_label("Start Processing")
+            self.action_button.remove_css_class("destructive-action")
+            self.action_button.add_css_class("suggested-action")

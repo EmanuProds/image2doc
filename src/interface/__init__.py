@@ -1,14 +1,14 @@
 """
-Modern GTK4/Libadwaita interface for Image2PDF application.
+Modern GTK4/Libadwaita interface for Image2DOC application.
 Provides a clean, responsive, and accessible user interface.
 """
 
-from .main_window import MainWindow
-from .home_page import HomePage
-from .settings_page import SettingsPage
-from .logs_page import LogsPage
-from .about_dialog import AboutDialog
-from .correction_dialog import CorrectionDialog
+from .main import MainWindow
+from .home import HomePage
+from .settings import SettingsPage
+from .logs import LogsPage
+from .about import AboutDialog
+from .correction import CorrectionDialog
 
 __all__ = [
     'MainWindow',
